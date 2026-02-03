@@ -6,12 +6,19 @@ import torch.nn.functional as F
 
 from .config import LlamaConfig
 from .layers import LlamaBlock, RMSNorm
+from ..utils.rope import precompute_rope_frequencies
 
 
 class Llama(nn.Module):
     """Complete LLaMA model."""
     
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, init_weights: bool = True):
+        """
+        Args:
+            config: Model configuration
+            init_weights: If True, initialize weights randomly. Set to False when
+                         loading pretrained weights to skip unnecessary init.
+        """
         super().__init__()
         self.config = config
         
@@ -20,11 +27,19 @@ class Llama(nn.Module):
         self.norm = RMSNorm(config.d_model, config.eps)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         
+        # RoPE: compute once, share across all layers
+        head_dim = config.d_model // config.num_heads
+        cos, sin = precompute_rope_frequencies(head_dim, config.max_seq_len)
+        self.register_buffer('cos', cos)
+        self.register_buffer('sin', sin)
+        
         # Weight tying: LLaMA-1/2 use it, TinyLlama does not
         if config.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
         
-        self.apply(self._init_weights)
+        # Skip init when loading pretrained (saves time on 1B+ params)
+        if init_weights:
+            self.apply(self._init_weights)
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -47,11 +62,11 @@ class Llama(nn.Module):
             mask = torch.tril(torch.ones(L, L, device=x.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
         
-        # Transformer layers
+        # Transformer layers (pass shared RoPE cos/sin)
         new_kv = []
         for i, layer in enumerate(self.layers):
             layer_past = past_kv[i] if past_kv is not None else None
-            x, kv = layer(x, mask, layer_past)
+            x, kv = layer(x, self.cos, self.sin, mask, layer_past)
             if use_cache:
                 new_kv.append(kv)
         

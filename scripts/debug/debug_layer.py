@@ -5,7 +5,7 @@ import sys
 import torch
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent  # scripts/debug -> scripts -> lolama
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -32,7 +32,7 @@ hf_model.eval()
 # Load our model
 print("Loading our model...")
 config = create_config_from_hf(MODEL_NAME, local_files_only=True)
-our_model = Llama(config).to(device)
+our_model = Llama(config, init_weights=False).to(device)
 our_model = load_weights_from_hf(our_model, MODEL_NAME, local_files_only=True)
 our_model.eval()
 

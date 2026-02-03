@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import math
 
 from .config import LlamaConfig
-from ..utils.rope import precompute_rope_frequencies, apply_rope
+from ..utils.rope import apply_rope
 
 
 class RMSNorm(nn.Module):
@@ -48,7 +48,10 @@ def repeat_kv(x, n_rep):
 
 
 class LlamaAttention(nn.Module):
-    """Multi-head attention with RoPE and Grouped Query Attention (GQA)."""
+    """Multi-head attention with RoPE and Grouped Query Attention (GQA).
+    
+    RoPE cos/sin are passed in from the parent Llama model (computed once, shared).
+    """
     
     def __init__(self, config: LlamaConfig):
         super().__init__()
@@ -67,13 +70,15 @@ class LlamaAttention(nn.Module):
         self.v_proj = nn.Linear(config.d_model, kv_dim, bias=False)
         
         self.o_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        
-        # Precompute RoPE frequencies
-        cos, sin = precompute_rope_frequencies(self.head_dim, config.max_seq_len)
-        self.register_buffer('cos', cos)
-        self.register_buffer('sin', sin)
     
-    def forward(self, x, mask=None, kv_cache=None):
+    def forward(self, x, cos, sin, mask=None, kv_cache=None):
+        """
+        Args:
+            x: Input tensor (B, L, d_model)
+            cos, sin: RoPE frequencies from parent model
+            mask: Causal attention mask
+            kv_cache: Optional (past_k, past_v) for generation
+        """
         B, L, _ = x.shape
         
         # Project to Q, K, V
@@ -85,13 +90,13 @@ class LlamaAttention(nn.Module):
         if kv_cache is not None:
             past_k, past_v = kv_cache
             offset = past_k.size(2)
-            Q = apply_rope(Q, self.cos[offset:offset+L], self.sin[offset:offset+L])
-            K = apply_rope(K, self.cos[offset:offset+L], self.sin[offset:offset+L])
+            Q = apply_rope(Q, cos[offset:offset+L], sin[offset:offset+L])
+            K = apply_rope(K, cos[offset:offset+L], sin[offset:offset+L])
             K = torch.cat([past_k, K], dim=2)
             V = torch.cat([past_v, V], dim=2)
         else:
-            Q = apply_rope(Q, self.cos[:L], self.sin[:L])
-            K = apply_rope(K, self.cos[:L], self.sin[:L])
+            Q = apply_rope(Q, cos[:L], sin[:L])
+            K = apply_rope(K, cos[:L], sin[:L])
         
         # Store before expanding (memory savings)
         kv_to_cache = (K, V)
@@ -134,8 +139,8 @@ class LlamaBlock(nn.Module):
         self.attention_norm = RMSNorm(config.d_model, config.eps)
         self.ffn_norm = RMSNorm(config.d_model, config.eps)
     
-    def forward(self, x, mask=None, kv_cache=None):
-        attn_out, new_kv = self.attention(self.attention_norm(x), mask, kv_cache)
+    def forward(self, x, cos, sin, mask=None, kv_cache=None):
+        attn_out, new_kv = self.attention(self.attention_norm(x), cos, sin, mask, kv_cache)
         x = x + attn_out
         x = x + self.feed_forward(self.ffn_norm(x))
         return x, new_kv

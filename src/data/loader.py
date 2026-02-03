@@ -265,7 +265,7 @@ def load_model(model_name_or_path, device="cpu"):
         )
     
     print("Creating model architecture...")
-    our_model = Llama(config)
+    our_model = Llama(config, init_weights=False)  # Skip random init, we're loading weights
     
     total_params = sum(p.numel() for p in our_model.parameters())
     print(f"  Total parameters: {total_params:,}")
