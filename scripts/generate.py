@@ -73,7 +73,10 @@ def main():
     if stream:
         # Streaming generation - print tokens as they're generated
         print("Output: ", end="", flush=True)
-        token_count = 0
+        
+        # Track all generated tokens for proper decoding
+        generated_tokens = []
+        prev_text = ""
         
         for token_id in model.generate_stream(
             input_ids,
@@ -83,13 +86,17 @@ def main():
             repetition_penalty=1.1,
             eos_token_id=tokenizer.eos_token_id,
         ):
-            token_text = tokenizer.decode([token_id])
-            print(token_text, end="", flush=True)
-            token_count += 1
+            generated_tokens.append(token_id)
+            # Decode all tokens so far to get proper spacing
+            full_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            # Print only the new part
+            new_text = full_text[len(prev_text):]
+            print(new_text, end="", flush=True)
+            prev_text = full_text
         
         print()
         print()
-        print(f"Generated {token_count} tokens")
+        print(f"Generated {len(generated_tokens)} tokens")
     else:
         # Batch generation
         with torch.no_grad():
