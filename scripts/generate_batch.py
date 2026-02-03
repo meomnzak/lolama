@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data import load_model, load_tokenizer
+from src.model import TextGenerator
 
 
 def main() -> None:
@@ -68,7 +69,8 @@ def main() -> None:
     
     # Generate in batch
     print("Generating...")
-    results = model.generate_batch(
+    generator = TextGenerator(model)
+    results = generator.generate_batch(
         tokenized_prompts,
         max_new_tokens=50,
         temperature=0.7,

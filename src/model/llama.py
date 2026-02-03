@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import torch
 import torch.nn as nn
 
 from .config import LlamaConfig
-from .generation_config import GenerationConfig
-from .generator import TextGenerator
 from .kv_cache import KVCache
 from .layers import LlamaBlock, RMSNorm
 from ..utils.rope import precompute_rope_frequencies
@@ -132,75 +128,6 @@ class Llama(nn.Module):
         logits: torch.Tensor = self.lm_head(x)
         
         return logits
-    
-    def _get_generator(self) -> TextGenerator:
-        """Get or create a TextGenerator for this model."""
-        if not hasattr(self, '_generator'):
-            self._generator: TextGenerator = TextGenerator(self)
-        return self._generator
-    
-    @torch.no_grad()
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        config: GenerationConfig | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        """Autoregressive text generation with pre-allocated KV cache.
-        
-        Note: Consider using TextGenerator directly for more control.
-        
-        Args:
-            input_ids: Input token IDs (B, L)
-            config: Generation configuration (preferred)
-            **kwargs: Individual parameters (for backwards compatibility)
-        
-        Returns:
-            torch.Tensor: Generated token IDs including prompt
-        """
-        return self._get_generator().generate(input_ids, config, **kwargs)
-    
-    @torch.no_grad()
-    def generate_stream(
-        self,
-        input_ids: torch.Tensor,
-        config: GenerationConfig | None = None,
-        **kwargs,
-    ) -> Iterator[int]:
-        """Streaming text generation - yields tokens as they're generated.
-        
-        Note: Consider using TextGenerator directly for more control.
-        
-        Args:
-            input_ids: Input token IDs (B, L) - must have batch_size=1
-            config: Generation configuration (preferred)
-            **kwargs: Individual parameters (for backwards compatibility)
-        
-        Yields:
-            int: Token ID for each generated token
-        """
-        yield from self._get_generator().generate_stream(input_ids, config, **kwargs)
-    
-    @torch.no_grad()
-    def generate_batch(
-        self,
-        prompts: list[torch.Tensor],
-        config: GenerationConfig | None = None,
-        **kwargs,
-    ) -> list[torch.Tensor]:
-        """Generate text for multiple prompts in parallel.
-        
-        Note: Consider using TextGenerator directly for more control.
-        
-        Args:
-            prompts: List of token ID tensors
-            config: Generation configuration (preferred)
-            **kwargs: Individual parameters (for backwards compatibility)
-        
-        Returns:
-            List of generated token tensors
-        """
-        return self._get_generator().generate_batch(prompts, config, **kwargs)
     
     def count_parameters(self) -> dict[str, int]:
         """Count model parameters."""

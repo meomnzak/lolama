@@ -17,6 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.data import load_model, load_tokenizer
+from src.model import TextGenerator
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
@@ -96,7 +97,7 @@ if hf_key in hf_state and our_key in our_state:
     print()
 
 with torch.no_grad():
-    our_output = our_model.generate(
+    our_output = TextGenerator(our_model).generate(
         input_ids,
         max_new_tokens=30,
         do_sample=False,  # Greedy decoding - no randomness

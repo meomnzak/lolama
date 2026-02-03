@@ -34,7 +34,7 @@ from src.model import (
     save_quantized_model,
     load_quantized_model,
     is_quantized_model_dir,
-    Llama,
+    TextGenerator,
 )
 
 
@@ -58,7 +58,7 @@ def get_source_dir(model_path: str) -> Path | None:
 
 
 def generate_response(
-    model: Llama,
+    generator: TextGenerator,
     tokenizer,
     prompt: str,
     device: str,
@@ -81,13 +81,13 @@ def generate_response(
         input_ids = input_ids.to(device)
     else:
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    
+
     if stream:
         # Streaming generation
         generated_tokens: list[int] = []
         prev_text: str = ""
-        
-        for token_id in model.generate_stream(
+
+        for token_id in generator.generate_stream(
             input_ids,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -100,12 +100,12 @@ def generate_response(
             new_text: str = full_text[len(prev_text):]
             print(new_text, end="", flush=True)
             prev_text = full_text
-        
+
         print()
     else:
         # Batch generation
         with torch.no_grad():
-            output_ids = model.generate(
+            output_ids = generator.generate(
                 input_ids,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
@@ -113,14 +113,14 @@ def generate_response(
                 repetition_penalty=1.1,
                 eos_token_id=tokenizer.eos_token_id,
             )
-        
+
         # Decode only the generated part
         generated_ids = output_ids[0, input_ids.shape[1]:]
         output_text: str = tokenizer.decode(generated_ids, skip_special_tokens=True)
         print(output_text)
 
 
-def interactive_chat(model: Llama, tokenizer, device: str, stream: bool = True) -> None:
+def interactive_chat(generator: TextGenerator, tokenizer, device: str, stream: bool = True) -> None:
     """Interactive chat loop. Ctrl+C to exit."""
     print()
     print("=" * 50)
@@ -139,7 +139,7 @@ def interactive_chat(model: Llama, tokenizer, device: str, stream: bool = True) 
                 
                 print()
                 print("Assistant: ", end="", flush=True)
-                generate_response(model, tokenizer, prompt, device, stream=stream)
+                generate_response(generator, tokenizer, prompt, device, stream=stream)
                 print()
                 
             except EOFError:
@@ -229,10 +229,13 @@ def main() -> None:
     
     # Load tokenizer
     tokenizer = load_tokenizer(tokenizer_source)
-    
+
+    # Create generator
+    generator = TextGenerator(model)
+
     # Interactive chat mode
     if chat_mode:
-        interactive_chat(model, tokenizer, device, stream=stream)
+        interactive_chat(generator, tokenizer, device, stream=stream)
         return
     
     # Single prompt mode
@@ -248,7 +251,7 @@ def main() -> None:
     else:
         print("Output: ", end="")
     
-    generate_response(model, tokenizer, prompt, device, stream=stream)
+    generate_response(generator, tokenizer, prompt, device, stream=stream)
 
 
 if __name__ == "__main__":
