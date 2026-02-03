@@ -8,12 +8,16 @@ Usage:
     python main.py --load tinyllama   # Load pretrained TinyLlama
 """
 
+from __future__ import annotations
+
 import sys
+
 import torch
+
 from src.model import Llama, LlamaConfig
 
 
-def main():
+def main() -> None:
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"Device: {device}")
     print()

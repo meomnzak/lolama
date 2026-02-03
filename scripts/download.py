@@ -11,9 +11,12 @@ Usage:
     python scripts/download.py --from-cache tinyllama
 """
 
+from __future__ import annotations
+
 import sys
-import torch
 from pathlib import Path
+
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).parent.parent

@@ -1,9 +1,11 @@
 """Full LLaMA Model."""
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional
+from collections.abc import Iterator
 
 from .config import LlamaConfig
 from .kv_cache import KVCache
@@ -22,15 +24,17 @@ class Llama(nn.Module):
                          loading pretrained weights to skip unnecessary init.
         """
         super().__init__()
-        self.config = config
+        self.config: LlamaConfig = config
         
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
-        self.layers = nn.ModuleList([LlamaBlock(config) for _ in range(config.num_layers)])
-        self.norm = RMSNorm(config.d_model, config.eps)
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.embed_tokens: nn.Embedding = nn.Embedding(config.vocab_size, config.d_model)
+        self.layers: nn.ModuleList = nn.ModuleList([LlamaBlock(config) for _ in range(config.num_layers)])
+        self.norm: RMSNorm = RMSNorm(config.d_model, config.eps)
+        self.lm_head: nn.Linear = nn.Linear(config.d_model, config.vocab_size, bias=False)
         
         # RoPE: compute once, share across all layers
-        head_dim = config.d_model // config.num_heads
+        head_dim: int = config.d_model // config.num_heads
+        cos: torch.Tensor
+        sin: torch.Tensor
         cos, sin = precompute_rope_frequencies(head_dim, config.max_seq_len)
         self.register_buffer('cos', cos)
         self.register_buffer('sin', sin)
@@ -43,7 +47,7 @@ class Llama(nn.Module):
         if init_weights:
             self.apply(self._init_weights)
     
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -54,10 +58,10 @@ class Llama(nn.Module):
     def create_kv_caches(
         self,
         batch_size: int,
-        max_seq_len: Optional[int] = None,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ) -> List[KVCache]:
+        max_seq_len: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> list[KVCache]:
         """Create pre-allocated KV caches for all layers.
         
         Args:
@@ -76,7 +80,7 @@ class Llama(nn.Module):
         if dtype is None:
             dtype = self.embed_tokens.weight.dtype
         
-        head_dim = self.config.d_model // self.config.num_heads
+        head_dim: int = self.config.d_model // self.config.num_heads
         
         return [
             KVCache(
@@ -93,9 +97,9 @@ class Llama(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        kv_caches: Optional[List[KVCache]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-    ):
+        kv_caches: list[KVCache] | None = None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             input_ids: (B, L) input token IDs
@@ -105,30 +109,30 @@ class Llama(nn.Module):
         Returns:
             logits: (B, L, vocab_size)
         """
-        x = self.embed_tokens(input_ids)
+        x: torch.Tensor = self.embed_tokens(input_ids)
         
         # Transformer layers (KV caches updated in-place)
         for i, layer in enumerate(self.layers):
-            layer_cache = kv_caches[i] if kv_caches is not None else None
+            layer_cache: KVCache | None = kv_caches[i] if kv_caches is not None else None
             x = layer(x, self.cos, self.sin, kv_cache=layer_cache, attention_mask=attention_mask)
         
         x = self.norm(x)
-        logits = self.lm_head(x)
+        logits: torch.Tensor = self.lm_head(x)
         
         return logits
     
     @torch.no_grad()
     def generate(
         self,
-        input_ids,
-        max_new_tokens=50,
-        temperature=1.0,
-        top_k=None,
-        top_p=None,
-        do_sample=True,
-        eos_token_id=None,
-        repetition_penalty=1.0,
-    ):
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        eos_token_id: int | None = None,
+        repetition_penalty: float = 1.0,
+    ) -> torch.Tensor:
         """Autoregressive text generation with pre-allocated KV cache.
         
         Args:
@@ -142,23 +146,23 @@ class Llama(nn.Module):
             repetition_penalty: Penalty for repeating tokens (1.0 = no penalty)
         """
         self.eval()
-        batch_size = input_ids.shape[0]
-        prompt_len = input_ids.shape[1]
+        batch_size: int = input_ids.shape[0]
+        prompt_len: int = input_ids.shape[1]
         
         # Track which sequences have finished (hit eos)
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+        finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
         
         # Create pre-allocated KV cache
-        kv_caches = self.create_kv_caches(
+        kv_caches: list[KVCache] = self.create_kv_caches(
             batch_size=batch_size,
             max_seq_len=prompt_len + max_new_tokens,
         )
         
         # Initial forward pass (populates cache)
-        logits = self(input_ids, kv_caches=kv_caches)
+        logits: torch.Tensor = self(input_ids, kv_caches=kv_caches)
         
         for _ in range(max_new_tokens):
-            next_logits = logits[:, -1, :]
+            next_logits: torch.Tensor = logits[:, -1, :]
             
             # Apply repetition penalty
             if repetition_penalty != 1.0:
@@ -166,33 +170,37 @@ class Llama(nn.Module):
                     for token_id in input_ids[i].unique():
                         next_logits[i, token_id] /= repetition_penalty
             
+            next_token: torch.Tensor
             if do_sample:
                 # Sampling with temperature
                 next_logits = next_logits / temperature
                 
                 # Top-k filtering
                 if top_k is not None:
+                    v: torch.Tensor
                     v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
                     next_logits[next_logits < v[:, [-1]]] = float('-inf')
                 
                 # Top-p (nucleus) filtering
                 if top_p is not None:
+                    sorted_logits: torch.Tensor
+                    sorted_indices: torch.Tensor
                     sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    cumulative_probs: torch.Tensor = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
                     
                     # Remove tokens with cumulative probability above threshold
-                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove: torch.Tensor = cumulative_probs > top_p
                     # Keep at least one token
                     sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
                     sorted_indices_to_remove[:, 0] = False
                     
                     # Scatter back to original indexing
-                    indices_to_remove = sorted_indices_to_remove.scatter(
+                    indices_to_remove: torch.Tensor = sorted_indices_to_remove.scatter(
                         1, sorted_indices, sorted_indices_to_remove
                     )
                     next_logits[indices_to_remove] = float('-inf')
                 
-                probs = F.softmax(next_logits, dim=-1)
+                probs: torch.Tensor = F.softmax(next_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
             else:
                 # Greedy decoding - just take argmax
@@ -213,15 +221,15 @@ class Llama(nn.Module):
     @torch.no_grad()
     def generate_stream(
         self,
-        input_ids,
-        max_new_tokens=50,
-        temperature=1.0,
-        top_k=None,
-        top_p=None,
-        do_sample=True,
-        eos_token_id=None,
-        repetition_penalty=1.0,
-    ):
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        do_sample: bool = True,
+        eos_token_id: int | None = None,
+        repetition_penalty: float = 1.0,
+    ) -> Iterator[int]:
         """Streaming text generation - yields tokens as they're generated.
         
         Args:
@@ -238,56 +246,60 @@ class Llama(nn.Module):
             int: Token ID for each generated token
         """
         self.eval()
-        batch_size = input_ids.shape[0]
-        prompt_len = input_ids.shape[1]
+        batch_size: int = input_ids.shape[0]
+        prompt_len: int = input_ids.shape[1]
         
         if batch_size != 1:
             raise ValueError("Streaming only supports batch_size=1")
         
         # Create pre-allocated KV cache
-        kv_caches = self.create_kv_caches(
+        kv_caches: list[KVCache] = self.create_kv_caches(
             batch_size=batch_size,
             max_seq_len=prompt_len + max_new_tokens,
         )
         
         # Initial forward pass (populates cache)
-        logits = self(input_ids, kv_caches=kv_caches)
+        logits: torch.Tensor = self(input_ids, kv_caches=kv_caches)
         
         for _ in range(max_new_tokens):
-            next_logits = logits[:, -1, :]
+            next_logits: torch.Tensor = logits[:, -1, :]
             
             # Apply repetition penalty
             if repetition_penalty != 1.0:
                 for token_id in input_ids[0].unique():
                     next_logits[0, token_id] /= repetition_penalty
             
+            next_token: torch.Tensor
             if do_sample:
                 # Sampling with temperature
                 next_logits = next_logits / temperature
                 
                 # Top-k filtering
                 if top_k is not None:
+                    v: torch.Tensor
                     v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
                     next_logits[next_logits < v[:, [-1]]] = float('-inf')
                 
                 # Top-p (nucleus) filtering
                 if top_p is not None:
+                    sorted_logits: torch.Tensor
+                    sorted_indices: torch.Tensor
                     sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    sorted_indices_to_remove = cumulative_probs > top_p
+                    cumulative_probs: torch.Tensor = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove: torch.Tensor = cumulative_probs > top_p
                     sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
                     sorted_indices_to_remove[:, 0] = False
-                    indices_to_remove = sorted_indices_to_remove.scatter(
+                    indices_to_remove: torch.Tensor = sorted_indices_to_remove.scatter(
                         1, sorted_indices, sorted_indices_to_remove
                     )
                     next_logits[indices_to_remove] = float('-inf')
                 
-                probs = F.softmax(next_logits, dim=-1)
+                probs: torch.Tensor = F.softmax(next_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
             else:
                 next_token = next_logits.argmax(dim=-1, keepdim=True)
             
-            token_id = next_token.item()
+            token_id: int = next_token.item()
             yield token_id
             
             # Check for EOS token
@@ -300,16 +312,16 @@ class Llama(nn.Module):
     @torch.no_grad()
     def generate_batch(
         self,
-        prompts: List[torch.Tensor],
+        prompts: list[torch.Tensor],
         max_new_tokens: int = 50,
         temperature: float = 1.0,
-        top_k: Optional[int] = None,
-        top_p: Optional[float] = None,
+        top_k: int | None = None,
+        top_p: float | None = None,
         do_sample: bool = True,
-        eos_token_id: Optional[int] = None,
+        eos_token_id: int | None = None,
         repetition_penalty: float = 1.0,
         pad_token_id: int = 0,
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         """Generate text for multiple prompts in parallel.
         
         Args:
@@ -327,46 +339,46 @@ class Llama(nn.Module):
             List of generated token tensors (without padding)
         """
         self.eval()
-        device = next(self.parameters()).device
-        batch_size = len(prompts)
+        device: torch.device = next(self.parameters()).device
+        batch_size: int = len(prompts)
         
         # Normalize prompts to 1D tensors
         prompts = [p.squeeze() if p.dim() > 1 else p for p in prompts]
-        prompt_lengths = [len(p) for p in prompts]
-        max_prompt_len = max(prompt_lengths)
+        prompt_lengths: list[int] = [len(p) for p in prompts]
+        max_prompt_len: int = max(prompt_lengths)
         
         # Pad prompts to same length (left-padding for causal LM)
-        padded_prompts = []
+        padded_prompts: list[torch.Tensor] = []
         for p in prompts:
-            pad_len = max_prompt_len - len(p)
+            pad_len: int = max_prompt_len - len(p)
             if pad_len > 0:
-                padding = torch.full((pad_len,), pad_token_id, dtype=p.dtype, device=device)
+                padding: torch.Tensor = torch.full((pad_len,), pad_token_id, dtype=p.dtype, device=device)
                 padded_prompts.append(torch.cat([padding, p]))
             else:
                 padded_prompts.append(p.to(device))
         
-        input_ids = torch.stack(padded_prompts)  # (B, max_prompt_len)
+        input_ids: torch.Tensor = torch.stack(padded_prompts)  # (B, max_prompt_len)
         
         # Create attention mask: 1 for real tokens, 0 for padding
-        attention_mask = (input_ids != pad_token_id).long()
+        attention_mask: torch.Tensor = (input_ids != pad_token_id).long()
         
         # Track which sequences have finished
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=device)
         
         # Create KV caches
-        kv_caches = self.create_kv_caches(
+        kv_caches: list[KVCache] = self.create_kv_caches(
             batch_size=batch_size,
             max_seq_len=max_prompt_len + max_new_tokens,
         )
         
         # Prefill
-        logits = self(input_ids, kv_caches=kv_caches, attention_mask=attention_mask)
+        logits: torch.Tensor = self(input_ids, kv_caches=kv_caches, attention_mask=attention_mask)
         
         # Generation loop
-        generated_tokens = [[] for _ in range(batch_size)]
+        generated_tokens: list[list[int]] = [[] for _ in range(batch_size)]
         
         for _ in range(max_new_tokens):
-            next_logits = logits[:, -1, :]
+            next_logits: torch.Tensor = logits[:, -1, :]
             
             # Apply repetition penalty
             if repetition_penalty != 1.0:
@@ -375,25 +387,29 @@ class Llama(nn.Module):
                         if token_id != pad_token_id:
                             next_logits[i, token_id] /= repetition_penalty
             
+            next_token: torch.Tensor
             if do_sample:
                 next_logits = next_logits / temperature
                 
                 if top_k is not None:
+                    v: torch.Tensor
                     v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
                     next_logits[next_logits < v[:, [-1]]] = float('-inf')
                 
                 if top_p is not None:
+                    sorted_logits: torch.Tensor
+                    sorted_indices: torch.Tensor
                     sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    sorted_indices_to_remove = cumulative_probs > top_p
+                    cumulative_probs: torch.Tensor = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove: torch.Tensor = cumulative_probs > top_p
                     sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
                     sorted_indices_to_remove[:, 0] = False
-                    indices_to_remove = sorted_indices_to_remove.scatter(
+                    indices_to_remove: torch.Tensor = sorted_indices_to_remove.scatter(
                         1, sorted_indices, sorted_indices_to_remove
                     )
                     next_logits[indices_to_remove] = float('-inf')
                 
-                probs = F.softmax(next_logits, dim=-1)
+                probs: torch.Tensor = F.softmax(next_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
             else:
                 next_token = next_logits.argmax(dim=-1, keepdim=True)
@@ -420,20 +436,23 @@ class Llama(nn.Module):
             logits = self(next_token, kv_caches=kv_caches, attention_mask=attention_mask)
         
         # Return original prompts + generated tokens (without padding)
-        results = []
+        results: list[torch.Tensor] = []
         for i, prompt in enumerate(prompts):
-            generated = torch.tensor(generated_tokens[i], dtype=prompt.dtype, device=device)
+            generated: torch.Tensor = torch.tensor(generated_tokens[i], dtype=prompt.dtype, device=device)
             results.append(torch.cat([prompt, generated]))
         
         return results
     
-    def count_parameters(self):
+    def count_parameters(self) -> dict[str, int]:
         """Count model parameters."""
-        total = sum(p.numel() for p in self.parameters())
-        embedding = self.embed_tokens.weight.numel()
+        total: int = sum(p.numel() for p in self.parameters())
+        embedding: int = self.embed_tokens.weight.numel()
         
+        attn_params: int
+        ffn_params: int
+        norm_params: int
         if self.layers:
-            layer = self.layers[0]
+            layer: LlamaBlock = self.layers[0]
             attn_params = sum(p.numel() for p in layer.attention.parameters())
             ffn_params = sum(p.numel() for p in layer.feed_forward.parameters())
             norm_params = sum(p.numel() for p in layer.attention_norm.parameters())

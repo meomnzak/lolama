@@ -4,6 +4,15 @@ from .config import LlamaConfig
 from .kv_cache import KVCache, repeat_kv
 from .layers import RMSNorm, LlamaAttention, SwiGLU, LlamaBlock
 from .llama import Llama
+from .quantize import (
+    QuantizedLinear,
+    quantize_model_int8,
+    dequantize_model_for_inference,
+    get_model_size_mb,
+    save_quantized_model,
+    load_quantized_model,
+    is_quantized_checkpoint,
+)
 
 __all__ = [
     # Config
@@ -18,4 +27,12 @@ __all__ = [
     # KV Cache
     'KVCache',
     'repeat_kv',
+    # Quantization
+    'QuantizedLinear',
+    'quantize_model_int8',
+    'dequantize_model_for_inference',
+    'get_model_size_mb',
+    'save_quantized_model',
+    'load_quantized_model',
+    'is_quantized_checkpoint',
 ]

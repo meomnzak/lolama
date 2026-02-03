@@ -1,6 +1,9 @@
 """Weight loading from HuggingFace with local-first resolution."""
 
+from __future__ import annotations
+
 from pathlib import Path
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -28,13 +31,8 @@ MODEL_REGISTRY = {
 }
 
 
-def resolve_model_source(model_name_or_path):
-    """
-    Resolve model source using priority:
-      1) weights/ directory
-      2) HuggingFace cache
-      3) Download from HuggingFace
-    """
+def resolve_model_source(model_name_or_path: str) -> dict[str, str | Path | bool | None]:
+    """Resolve model source using priority: weights/ -> HF cache -> download."""
     # Explicit local path
     path = Path(model_name_or_path)
     if path.exists():
@@ -62,7 +60,11 @@ def resolve_model_source(model_name_or_path):
     }
 
 
-def _try_from_pretrained(model_name, trust_remote_code, local_files_only):
+def _try_from_pretrained(
+    model_name: str,
+    trust_remote_code: bool,
+    local_files_only: bool,
+) -> AutoModelForCausalLM:
     return AutoModelForCausalLM.from_pretrained(
         model_name,
         dtype=torch.float16,
@@ -72,11 +74,11 @@ def _try_from_pretrained(model_name, trust_remote_code, local_files_only):
     )
 
 
-def load_tokenizer(model_name_or_path, trust_remote_code=False):
-    """
-    Load tokenizer with priority:
-      weights/ -> cache -> download
-    """
+def load_tokenizer(
+    model_name_or_path: str,
+    trust_remote_code: bool = False,
+) -> AutoTokenizer:
+    """Load tokenizer with priority: weights/ -> cache -> download."""
     source = resolve_model_source(model_name_or_path)
 
     if source["local_path"] is not None:
@@ -100,7 +102,12 @@ def load_tokenizer(model_name_or_path, trust_remote_code=False):
     return tokenizer
 
 
-def load_weights_from_hf(our_model, hf_model_path, trust_remote_code=False, local_files_only=False):
+def load_weights_from_hf(
+    our_model: Llama,
+    hf_model_path: str | Path,
+    trust_remote_code: bool = False,
+    local_files_only: bool = False,
+) -> Llama:
     """Load weights from HuggingFace model into our model."""
     print(f"Loading weights from {hf_model_path}...")
     hf_model = _try_from_pretrained(
@@ -185,7 +192,11 @@ def load_weights_from_hf(our_model, hf_model_path, trust_remote_code=False, loca
     return our_model
 
 
-def create_config_from_hf(hf_model_name, trust_remote_code=False, local_files_only=False):
+def create_config_from_hf(
+    hf_model_name: str | Path,
+    trust_remote_code: bool = False,
+    local_files_only: bool = False,
+) -> LlamaConfig:
     """Create LlamaConfig from HuggingFace model."""
     from transformers import AutoConfig
     
@@ -230,9 +241,13 @@ def create_config_from_hf(hf_model_name, trust_remote_code=False, local_files_on
     return config
 
 
-def load_model(model_name_or_path, device="cpu", dtype=torch.float16, compile_model=False):
-    """
-    Load a pretrained model from HuggingFace.
+def load_model(
+    model_name_or_path: str,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float16,
+    compile_model: bool = False,
+) -> Llama:
+    """Load a pretrained model from HuggingFace.
     
     Args:
         model_name_or_path: HuggingFace model name or local path

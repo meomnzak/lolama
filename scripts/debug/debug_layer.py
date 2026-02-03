@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Debug: Compare layer by layer."""
 
+from __future__ import annotations
+
 import sys
-import torch
 from pathlib import Path
+
+import torch
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # scripts/debug -> scripts -> lolama
 sys.path.insert(0, str(PROJECT_ROOT))

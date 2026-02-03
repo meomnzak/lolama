@@ -1,7 +1,8 @@
 """KV Cache for efficient autoregressive generation."""
 
+from __future__ import annotations
+
 import torch
-from typing import Tuple
 
 
 class KVCache:
@@ -20,20 +21,20 @@ class KVCache:
         device: torch.device,
         dtype: torch.dtype,
     ):
-        self.max_seq_len = max_seq_len
-        self.current_len = 0
+        self.max_seq_len: int = max_seq_len
+        self.current_len: int = 0
         
         # Pre-allocate buffers: (batch, num_kv_heads, max_seq_len, head_dim)
-        self.k_cache = torch.zeros(
+        self.k_cache: torch.Tensor = torch.zeros(
             batch_size, num_kv_heads, max_seq_len, head_dim,
             device=device, dtype=dtype
         )
-        self.v_cache = torch.zeros(
+        self.v_cache: torch.Tensor = torch.zeros(
             batch_size, num_kv_heads, max_seq_len, head_dim,
             device=device, dtype=dtype
         )
     
-    def update(self, k: torch.Tensor, v: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def update(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Update cache with new K, V and return full cache up to current position.
         
         Args:
@@ -42,7 +43,7 @@ class KVCache:
         Returns:
             Full K, V tensors up to current position
         """
-        new_len = k.shape[2]
+        new_len: int = k.shape[2]
         
         # Write new values into pre-allocated buffer
         self.k_cache[:, :, self.current_len:self.current_len + new_len] = k
@@ -56,7 +57,7 @@ class KVCache:
             self.v_cache[:, :, :self.current_len],
         )
     
-    def reset(self):
+    def reset(self) -> None:
         """Reset cache for new generation."""
         self.current_len = 0
     
@@ -79,6 +80,10 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     if n_rep == 1:
         return x
     
+    batch: int
+    num_kv_heads: int
+    seq_len: int
+    head_dim: int
     batch, num_kv_heads, seq_len, head_dim = x.shape
     x = x.unsqueeze(2).expand(batch, num_kv_heads, n_rep, seq_len, head_dim)
     return x.reshape(batch, num_kv_heads * n_rep, seq_len, head_dim)
