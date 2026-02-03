@@ -22,6 +22,9 @@ venv/
 # OS
 .DS_Store
 
+# Claude
+.claude/
+
 # Temp files
 *.log
 *.txt
