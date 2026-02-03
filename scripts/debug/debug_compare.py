@@ -16,9 +16,9 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent  # scripts/debug -> scripts -
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from src.data import load_model, load_tokenizer
-from src.model import TextGenerator
-from src.utils import resolve_device
+from lolama.data import load_model, load_tokenizer
+from lolama.model import TextGenerator
+from lolama.utils import resolve_device
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 

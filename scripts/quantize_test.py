@@ -19,9 +19,9 @@ import torch
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data import load_model, load_tokenizer
-from src.model import quantize_model_int8, get_model_size_mb, TextGenerator
-from src.utils import resolve_device
+from lolama.data import load_model, load_tokenizer
+from lolama.model import quantize_model_int8, get_model_size_mb, TextGenerator
+from lolama.utils import resolve_device
 
 
 def main() -> None:

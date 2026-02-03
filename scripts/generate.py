@@ -27,8 +27,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 WEIGHTS_DIR = PROJECT_ROOT / "weights"
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data import load_model, load_tokenizer, resolve_model_source
-from src.model import (
+from lolama.data import load_model, load_tokenizer, resolve_model_source
+from lolama.model import (
     quantize_model_int8,
     dequantize_model_for_inference,
     get_model_size_mb,
@@ -37,7 +37,7 @@ from src.model import (
     is_quantized_model_dir,
     TextGenerator,
 )
-from src.utils import resolve_device
+from lolama.utils import resolve_device
 
 
 def get_quantized_dir(model_path: str) -> Path:

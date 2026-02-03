@@ -1,6 +1,6 @@
 import pytest
 
-from src.model.generation_config import GenerationConfig
+from lolama.model.generation_config import GenerationConfig
 
 
 def test_valid_config():

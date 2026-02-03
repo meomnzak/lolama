@@ -1,6 +1,6 @@
 import pytest
 
-from src.model.config import LlamaConfig
+from lolama.model.config import LlamaConfig
 
 
 def test_valid_config(tiny_config):

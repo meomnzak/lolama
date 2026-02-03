@@ -9,29 +9,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..model import Llama, LlamaConfig
 from ..utils.logging import get_data_logger
+from .registry import MODEL_REGISTRY
 
 logger = get_data_logger()
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 WEIGHTS_DIR = PROJECT_ROOT / "weights"
-
-MODEL_REGISTRY = {
-    "tinyllama": {
-        "hf_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "folder": "tinyllama-1.1b",
-        "trust_remote_code": False,
-    },
-    "phi2": {
-        "hf_name": "microsoft/phi-2",
-        "folder": "phi-2",
-        "trust_remote_code": True,
-    },
-    "llama7b": {
-        "hf_name": "meta-llama/Llama-2-7b-hf",
-        "folder": "llama-7b",
-        "trust_remote_code": False,
-    },
-}
 
 
 def resolve_model_source(model_name_or_path: str) -> dict[str, str | Path | bool | None]:

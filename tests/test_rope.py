@@ -1,6 +1,6 @@
 import torch
 
-from src.utils.rope import precompute_rope_frequencies, apply_rope, rotate_half
+from lolama.utils.rope import precompute_rope_frequencies, apply_rope, rotate_half
 
 
 class TestPrecomputeRopeFrequencies:

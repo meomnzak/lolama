@@ -12,8 +12,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent  # scripts/debug -> scripts -
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from src.model import Llama, LlamaConfig
-from src.data import create_config_from_hf, load_weights_from_hf
+from lolama.model import Llama, LlamaConfig
+from lolama.data import create_config_from_hf, load_weights_from_hf
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 device = "cpu"  # Use CPU for easier debugging

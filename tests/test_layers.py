@@ -1,6 +1,6 @@
 import torch
 
-from src.model.layers import RMSNorm, SwiGLU, LlamaAttention, LlamaBlock
+from lolama.model.layers import RMSNorm, SwiGLU, LlamaAttention, LlamaBlock
 
 
 class TestRMSNorm:
@@ -38,7 +38,7 @@ class TestLlamaAttention:
         assert out.shape == (2, 8, tiny_config.d_model)
 
     def test_with_kv_cache(self, tiny_config, rope_freqs):
-        from src.model.kv_cache import KVCache
+        from lolama.model.kv_cache import KVCache
 
         attn = LlamaAttention(tiny_config)
         cos, sin = rope_freqs

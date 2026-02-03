@@ -1,6 +1,6 @@
 import torch
 
-from src.model.sampler import Sampler
+from lolama.model.sampler import Sampler
 
 
 class TestSampler:

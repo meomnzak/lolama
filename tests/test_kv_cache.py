@@ -1,6 +1,6 @@
 import torch
 
-from src.model.kv_cache import KVCache, repeat_kv
+from lolama.model.kv_cache import KVCache, repeat_kv
 
 
 class TestKVCache:

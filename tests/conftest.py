@@ -1,9 +1,9 @@
 import pytest
 import torch
 
-from src.model.config import LlamaConfig
-from src.model.llama import Llama
-from src.utils.rope import precompute_rope_frequencies
+from lolama.model.config import LlamaConfig
+from lolama.model.llama import Llama
+from lolama.utils.rope import precompute_rope_frequencies
 
 
 @pytest.fixture

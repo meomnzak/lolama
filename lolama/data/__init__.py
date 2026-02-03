@@ -8,6 +8,7 @@ from .loader import (
     resolve_model_source,
     WeightLoadingError,
 )
+from .registry import MODEL_REGISTRY
 
 __all__ = [
     'load_model',
@@ -16,4 +17,5 @@ __all__ = [
     'load_tokenizer',
     'resolve_model_source',
     'WeightLoadingError',
+    'MODEL_REGISTRY',
 ]
