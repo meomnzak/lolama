@@ -21,34 +21,50 @@ import torch
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
+WEIGHTS_DIR = PROJECT_ROOT / "weights"
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data import load_model, load_tokenizer
+from src.data import load_model, load_tokenizer, resolve_model_source
 from src.model import (
     quantize_model_int8,
     dequantize_model_for_inference,
     get_model_size_mb,
     save_quantized_model,
     load_quantized_model,
+    is_quantized_model_dir,
 )
 
 
-def get_quantized_path(model_path: str) -> Path:
-    """Get the path where quantized model would be saved."""
-    # Convert model name to a safe filename
-    safe_name = model_path.replace("/", "_").replace("\\", "_")
-    return PROJECT_ROOT / "weights" / f"{safe_name}-int8.pt"
+def get_quantized_dir(model_path: str) -> Path:
+    """Get the directory where quantized model would be saved."""
+    # If it's a local path, use basename
+    path = Path(model_path)
+    if path.exists():
+        name = path.name
+    else:
+        # HuggingFace model name - convert to safe dirname
+        name = model_path.replace("/", "_").replace("\\", "_")
+    
+    return WEIGHTS_DIR / f"{name}-int8"
+
+
+def get_source_dir(model_path: str) -> Path | None:
+    """Get the source directory for copying tokenizer files."""
+    source = resolve_model_source(model_path)
+    if source["local_path"] is not None:
+        return Path(source["local_path"])
+    return None
 
 
 def main() -> None:
     # Parse args
-    model_path = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-    prompt = "The meaning of life is"
-    stream = False
-    quantize = False
-    fast_mode = False
+    model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    prompt: str = "The meaning of life is"
+    stream: bool = False
+    quantize: bool = False
+    fast_mode: bool = False
     
-    args = sys.argv[1:]
+    args: list[str] = sys.argv[1:]
     
     if "--stream" in args:
         stream = True
@@ -63,7 +79,7 @@ def main() -> None:
         args.remove("--fast")
     
     if "--model" in args:
-        idx = args.index("--model")
+        idx: int = args.index("--model")
         model_path = args[idx + 1]
         args = args[:idx] + args[idx+2:]
     
@@ -71,47 +87,52 @@ def main() -> None:
         prompt = " ".join(args)
     
     # Device
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    device: str = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"Device: {device}")
     print()
     
     # Load model (with optional quantization)
-    quantized_path = get_quantized_path(model_path)
+    quantized_dir: Path = get_quantized_dir(model_path)
+    tokenizer_source: str = model_path  # Default: load tokenizer from original model
     
-    if quantize and quantized_path.exists():
+    if quantize and is_quantized_model_dir(str(quantized_dir)):
         # Load existing quantized model
-        print(f"Found saved quantized model: {quantized_path}")
+        print(f"Found saved quantized model: {quantized_dir}/")
         model = load_model(model_path, device="cpu")  # Load to CPU first
         quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'])  # Convert architecture
-        load_quantized_model(str(quantized_path), model)  # Load quantized weights
+        load_quantized_model(str(quantized_dir), model)  # Load quantized weights
         model = model.to(device)
         
         if fast_mode:
             dequantize_model_for_inference(model)  # Cache fp16 weights for fast inference
         
+        # Tokenizer is in the quantized directory now
+        tokenizer_source = str(quantized_dir)
         print(f"Model size: {get_model_size_mb(model):.1f} MB")
     elif quantize:
         # Quantize and save for next time
         model = load_model(model_path, device=device)
-        size_before = get_model_size_mb(model)
+        size_before: float = get_model_size_mb(model)
         print(f"Quantizing model (before: {size_before:.1f} MB)...")
         quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'])
         
-        # Save for next time
-        save_quantized_model(model, str(quantized_path))
+        # Save to directory (with tokenizer files)
+        source_dir: Path | None = get_source_dir(model_path)
+        print(f"\nSaving quantized model to {quantized_dir}/")
+        save_quantized_model(model, str(quantized_dir), str(source_dir) if source_dir else None)
         
         if fast_mode:
             # Pre-dequantize for fast inference
             dequantize_model_for_inference(model)
         
-        print(f"Model size: {get_model_size_mb(model):.1f} MB")
+        print(f"\nModel size: {get_model_size_mb(model):.1f} MB")
         print()
     else:
         # Normal fp16 model
         model = load_model(model_path, device=device)
     
     # Load tokenizer
-    tokenizer = load_tokenizer(model_path)
+    tokenizer = load_tokenizer(tokenizer_source)
     
     # Prepare input
     print()

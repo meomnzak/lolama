@@ -212,57 +212,116 @@ def get_model_size_mb(model: nn.Module) -> float:
     return (param_size + buffer_size) / 1e6
 
 
-def save_quantized_model(model: nn.Module, path: str) -> None:
-    """Save a quantized model to disk.
+def save_quantized_model(
+    model: nn.Module,
+    output_dir: str,
+    source_dir: str | None = None,
+) -> None:
+    """Save a quantized model to a directory.
+    
+    Creates a standalone quantized model directory with:
+    - model.pt: Quantized weights
+    - quantization_config.json: Quantization metadata
+    - Copied files from source: tokenizer, config, etc.
     
     Args:
         model: The quantized model
-        path: Path to save to (e.g., 'weights/tinyllama-int8.pt')
+        output_dir: Directory to save to (e.g., 'weights/tinyllama-1.1b-int8')
+        source_dir: Original model directory to copy tokenizer/config from
     """
-    import os
-    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+    import json
+    import shutil
+    from pathlib import Path
     
-    # Save state dict (includes int8 weights and scales)
+    output_path: Path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Copy tokenizer and config files from source
+    if source_dir is not None:
+        source_path: Path = Path(source_dir)
+        files_to_copy: list[str] = [
+            'tokenizer.json',
+            'tokenizer_config.json', 
+            'special_tokens_map.json',
+            'chat_template.jinja',
+            'generation_config.json',
+            'config.json',
+        ]
+        for filename in files_to_copy:
+            src_file: Path = source_path / filename
+            if src_file.exists():
+                shutil.copy2(src_file, output_path / filename)
+                print(f"  Copied {filename}")
+    
+    # Save quantized weights
+    weights_path: Path = output_path / "model.pt"
     torch.save({
         'state_dict': model.state_dict(),
-        'config': model.config if hasattr(model, 'config') else None,
+        'config': model.config.__dict__ if hasattr(model, 'config') else None,
         'quantized': True,
-    }, path)
+        'quantization': {
+            'method': 'int8_weight_only',
+            'bits': 8,
+        },
+    }, weights_path)
     
-    size_mb: float = os.path.getsize(path) / 1e6
-    print(f"Saved quantized model to {path} ({size_mb:.1f} MB)")
+    size_mb: float = weights_path.stat().st_size / 1e6
+    print(f"  Saved model.pt ({size_mb:.1f} MB)")
+    
+    # Save quantization config
+    quant_config: dict = {
+        'quantization_method': 'int8_weight_only',
+        'bits': 8,
+        'skip_layers': ['lm_head', 'embed_tokens'],
+    }
+    quant_config_path: Path = output_path / "quantization_config.json"
+    with open(quant_config_path, 'w') as f:
+        json.dump(quant_config, f, indent=2)
+    
+    print(f"Saved quantized model to {output_dir}/")
 
 
-def load_quantized_model(path: str, model: nn.Module) -> nn.Module:
-    """Load a quantized model from disk.
+def load_quantized_model(
+    model_dir: str,
+    model: nn.Module,
+) -> nn.Module:
+    """Load quantized weights from a directory into a model.
     
     Note: The model architecture must already have QuantizedLinear layers.
     Call quantize_model_int8() first to convert the architecture, then load weights.
     
     Args:
-        path: Path to the saved quantized model
+        model_dir: Path to the quantized model directory
         model: Model with QuantizedLinear layers (call quantize_model_int8 first)
     
     Returns:
         Model with loaded quantized weights
     """
-    checkpoint: dict = torch.load(path, map_location='cpu', weights_only=False)
+    from pathlib import Path
+    
+    model_path: Path = Path(model_dir)
+    weights_path: Path = model_path / "model.pt"
+    
+    if not weights_path.exists():
+        raise ValueError(f"No model.pt found in {model_dir}")
+    
+    checkpoint: dict = torch.load(weights_path, map_location='cpu', weights_only=False)
     
     if not checkpoint.get('quantized', False):
-        raise ValueError(f"{path} is not a quantized model checkpoint")
+        raise ValueError(f"{weights_path} is not a quantized model checkpoint")
     
     model.load_state_dict(checkpoint['state_dict'])
-    print(f"Loaded quantized model from {path}")
+    print(f"Loaded quantized model from {model_dir}/")
     
     return model
 
 
-def is_quantized_checkpoint(path: str) -> bool:
-    """Check if a checkpoint file is a quantized model."""
-    if not path.endswith('.pt'):
-        return False
-    try:
-        checkpoint: dict = torch.load(path, map_location='cpu', weights_only=False)
-        return checkpoint.get('quantized', False)
-    except Exception:
-        return False
+def is_quantized_model_dir(path: str) -> bool:
+    """Check if a path is a quantized model directory."""
+    from pathlib import Path
+    
+    model_path: Path = Path(path)
+    weights_file: Path = model_path / "model.pt"
+    quant_config: Path = model_path / "quantization_config.json"
+    
+    return weights_file.exists() and quant_config.exists()

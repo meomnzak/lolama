@@ -11,7 +11,7 @@ from .quantize import (
     get_model_size_mb,
     save_quantized_model,
     load_quantized_model,
-    is_quantized_checkpoint,
+    is_quantized_model_dir,
 )
 
 __all__ = [
@@ -34,5 +34,5 @@ __all__ = [
     'get_model_size_mb',
     'save_quantized_model',
     'load_quantized_model',
-    'is_quantized_checkpoint',
+    'is_quantized_model_dir',
 ]
