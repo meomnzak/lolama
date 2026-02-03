@@ -96,21 +96,25 @@ class LlamaAttention(nn.Module):
         S = K.shape[2]  # Full sequence length (including cache)
         
         if attention_mask is not None:
-            # Create combined causal + padding mask
-            # Causal: position i can attend to j where j <= i
-            causal_mask = torch.tril(torch.ones(L, S, device=x.device, dtype=torch.bool))
-            
             # Padding mask: (B, S) -> (B, 1, 1, S) for broadcasting
             # attention_mask has 1=attend, 0=padding
             padding_mask = attention_mask[:, None, None, :].bool()
             
-            # Combine: attend only if causal allows AND not padding
-            # Shape: (B, 1, L, S)
-            combined_mask = causal_mask.unsqueeze(0) & padding_mask
+            if L > 1:
+                # Prefill: need causal + padding mask
+                # Create causal mask where position i can attend to j where j <= i
+                # Use offset to account for where we are in the sequence
+                causal_mask = torch.ones(L, S, device=x.device, dtype=torch.bool)
+                causal_mask = torch.tril(causal_mask, diagonal=S - L)
+                combined_mask = causal_mask.unsqueeze(0) & padding_mask
+            else:
+                # Generation (L=1): new token can attend to all non-padding positions
+                # No causal constraint needed - just use padding mask
+                combined_mask = padding_mask.expand(-1, -1, L, -1)
             
             # Convert to additive mask for SDPA (0=attend, -inf=mask)
             attn_mask = torch.where(combined_mask, 0.0, float('-inf')).to(x.dtype)
-            is_causal = False  # We handle causal in the mask
+            is_causal = False  # We handle masking ourselves
         else:
             attn_mask = None
             # Use is_causal only for prefill (L > 1), not for single-token generation

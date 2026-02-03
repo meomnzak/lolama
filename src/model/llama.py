@@ -297,6 +297,136 @@ class Llama(nn.Module):
             input_ids = torch.cat([input_ids, next_token], dim=1)
             logits = self(next_token, kv_caches=kv_caches)
     
+    @torch.no_grad()
+    def generate_batch(
+        self,
+        prompts: List[torch.Tensor],
+        max_new_tokens: int = 50,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        do_sample: bool = True,
+        eos_token_id: Optional[int] = None,
+        repetition_penalty: float = 1.0,
+        pad_token_id: int = 0,
+    ) -> List[torch.Tensor]:
+        """Generate text for multiple prompts in parallel.
+        
+        Args:
+            prompts: List of token ID tensors, each (1, L_i) or (L_i,)
+            max_new_tokens: Maximum tokens to generate per sequence
+            temperature: Sampling temperature
+            top_k: Top-k sampling
+            top_p: Nucleus sampling threshold
+            do_sample: If False, use greedy decoding
+            eos_token_id: Stop token
+            repetition_penalty: Penalty for repeating tokens
+            pad_token_id: Token ID used for padding
+        
+        Returns:
+            List of generated token tensors (without padding)
+        """
+        self.eval()
+        device = next(self.parameters()).device
+        batch_size = len(prompts)
+        
+        # Normalize prompts to 1D tensors
+        prompts = [p.squeeze() if p.dim() > 1 else p for p in prompts]
+        prompt_lengths = [len(p) for p in prompts]
+        max_prompt_len = max(prompt_lengths)
+        
+        # Pad prompts to same length (left-padding for causal LM)
+        padded_prompts = []
+        for p in prompts:
+            pad_len = max_prompt_len - len(p)
+            if pad_len > 0:
+                padding = torch.full((pad_len,), pad_token_id, dtype=p.dtype, device=device)
+                padded_prompts.append(torch.cat([padding, p]))
+            else:
+                padded_prompts.append(p.to(device))
+        
+        input_ids = torch.stack(padded_prompts)  # (B, max_prompt_len)
+        
+        # Create attention mask: 1 for real tokens, 0 for padding
+        attention_mask = (input_ids != pad_token_id).long()
+        
+        # Track which sequences have finished
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        
+        # Create KV caches
+        kv_caches = self.create_kv_caches(
+            batch_size=batch_size,
+            max_seq_len=max_prompt_len + max_new_tokens,
+        )
+        
+        # Prefill
+        logits = self(input_ids, kv_caches=kv_caches, attention_mask=attention_mask)
+        
+        # Generation loop
+        generated_tokens = [[] for _ in range(batch_size)]
+        
+        for _ in range(max_new_tokens):
+            next_logits = logits[:, -1, :]
+            
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                for i in range(batch_size):
+                    for token_id in input_ids[i].unique():
+                        if token_id != pad_token_id:
+                            next_logits[i, token_id] /= repetition_penalty
+            
+            if do_sample:
+                next_logits = next_logits / temperature
+                
+                if top_k is not None:
+                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
+                
+                if top_p is not None:
+                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+                    sorted_indices_to_remove[:, 0] = False
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        1, sorted_indices, sorted_indices_to_remove
+                    )
+                    next_logits[indices_to_remove] = float('-inf')
+                
+                probs = F.softmax(next_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            
+            # Store generated tokens (only for unfinished sequences)
+            for i in range(batch_size):
+                if not finished[i]:
+                    generated_tokens[i].append(next_token[i].item())
+            
+            # Check for EOS
+            if eos_token_id is not None:
+                finished = finished | (next_token.squeeze(-1) == eos_token_id)
+                if finished.all():
+                    break
+            
+            # Update for next iteration
+            input_ids = torch.cat([input_ids, next_token], dim=1)
+            # Extend attention mask (new tokens are always real)
+            attention_mask = torch.cat([
+                attention_mask,
+                torch.ones(batch_size, 1, dtype=attention_mask.dtype, device=device)
+            ], dim=1)
+            
+            logits = self(next_token, kv_caches=kv_caches, attention_mask=attention_mask)
+        
+        # Return original prompts + generated tokens (without padding)
+        results = []
+        for i, prompt in enumerate(prompts):
+            generated = torch.tensor(generated_tokens[i], dtype=prompt.dtype, device=device)
+            results.append(torch.cat([prompt, generated]))
+        
+        return results
+    
     def count_parameters(self):
         """Count model parameters."""
         total = sum(p.numel() for p in self.parameters())
