@@ -203,11 +203,11 @@ def main() -> None:
         quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'])
         load_quantized_model(str(quantized_dir), model)
         model = model.to(device)
-        
+
         if fast_mode:
             dequantize_model_for_inference(model)
-        
-        tokenizer_source = str(quantized_dir)
+
+        # Keep original model_path for tokenizer (quantized dir may not have tokenizer files)
         print(f"Model size: {get_model_size_mb(model):.1f} MB")
     elif quantize:
         model = load_model(model_path, device=device)

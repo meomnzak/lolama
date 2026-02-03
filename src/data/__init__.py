@@ -6,6 +6,7 @@ from .loader import (
     create_config_from_hf,
     load_tokenizer,
     resolve_model_source,
+    WeightLoadingError,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     'create_config_from_hf',
     'load_tokenizer',
     'resolve_model_source',
+    'WeightLoadingError',
 ]

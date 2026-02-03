@@ -102,35 +102,52 @@ def load_tokenizer(
     return tokenizer
 
 
+class WeightLoadingError(Exception):
+    """Raised when weight loading fails to meet the required threshold."""
+    pass
+
+
 def load_weights_from_hf(
     our_model: Llama,
     hf_model_path: str | Path,
     trust_remote_code: bool = False,
     local_files_only: bool = False,
+    strict_threshold: float = 0.95,
 ) -> Llama:
-    """Load weights from HuggingFace model into our model."""
+    """Load weights from HuggingFace model into our model.
+
+    Args:
+        our_model: Target model to load weights into
+        hf_model_path: Path or HF model name
+        trust_remote_code: Whether to trust remote code
+        local_files_only: Only use local files
+        strict_threshold: Minimum fraction of weights that must load successfully.
+            Default 0.95 (95%). Set to 0.0 to disable strict checking.
+
+    Returns:
+        Model with loaded weights
+
+    Raises:
+        WeightLoadingError: If match rate falls below strict_threshold
+    """
     print(f"Loading weights from {hf_model_path}...")
     hf_model = _try_from_pretrained(
         hf_model_path,
         trust_remote_code=trust_remote_code,
         local_files_only=local_files_only,
     )
-    
+
     hf_state = hf_model.state_dict()
-    
-    print(f"HF model has {len(hf_state)} parameters")
-    print(f"Our model has {len(list(our_model.state_dict().keys()))} parameters")
-    print()
-    
+
     # Build mapping (HF key -> Our key)
-    mapping = {}
+    mapping: dict[str, str] = {}
     mapping['model.embed_tokens.weight'] = 'embed_tokens.weight'
-    
+
     num_layers = our_model.config.num_layers
     for i in range(num_layers):
         prefix_hf = f'model.layers.{i}'
         prefix_our = f'layers.{i}'
-        
+
         mapping[f'{prefix_hf}.self_attn.q_proj.weight'] = f'{prefix_our}.attention.q_proj.weight'
         mapping[f'{prefix_hf}.self_attn.k_proj.weight'] = f'{prefix_our}.attention.k_proj.weight'
         mapping[f'{prefix_hf}.self_attn.v_proj.weight'] = f'{prefix_our}.attention.v_proj.weight'
@@ -140,55 +157,99 @@ def load_weights_from_hf(
         mapping[f'{prefix_hf}.mlp.down_proj.weight'] = f'{prefix_our}.feed_forward.w_down.weight'
         mapping[f'{prefix_hf}.input_layernorm.weight'] = f'{prefix_our}.attention_norm.weight'
         mapping[f'{prefix_hf}.post_attention_layernorm.weight'] = f'{prefix_our}.ffn_norm.weight'
-    
+
     mapping['model.norm.weight'] = 'norm.weight'
     mapping['lm_head.weight'] = 'lm_head.weight'
-    
+
     # Get current state dict for shape comparison
     our_state = our_model.state_dict()
-    
-    # Build new state dict with HF weights mapped to our keys
-    new_state_dict = {}
-    matched = 0
-    shape_mismatches = []
-    
+
+    # Track all issues for diagnostics
+    new_state_dict: dict[str, torch.Tensor] = {}
+    matched: int = 0
+    missing_in_hf: list[str] = []
+    missing_in_ours: list[str] = []
+    shape_mismatches: list[dict] = []
+
     for hf_key, our_key in mapping.items():
         if hf_key not in hf_state:
+            missing_in_hf.append(hf_key)
             continue
-        
+
         hf_tensor = hf_state[hf_key]
-        
+
         if our_key not in our_state:
+            missing_in_ours.append(our_key)
             continue
-        
+
         our_tensor = our_state[our_key]
-        
+
         if hf_tensor.shape != our_tensor.shape:
             shape_mismatches.append({
-                'key': our_key,
-                'hf_shape': hf_tensor.shape,
-                'our_shape': our_tensor.shape
+                'hf_key': hf_key,
+                'our_key': our_key,
+                'hf_shape': tuple(hf_tensor.shape),
+                'our_shape': tuple(our_tensor.shape),
             })
             continue
-        
+
         new_state_dict[our_key] = hf_tensor.to(our_tensor.dtype)
         matched += 1
-    
-    # Load all weights at once
-    missing, unexpected = our_model.load_state_dict(new_state_dict, strict=False)
-    if missing:
-        print(f"   Note: {len(missing)} keys not in new_state_dict (expected for RoPE buffers)")
-    
-    print(f"✅ Successfully loaded {matched}/{len(mapping)} weights")
-    
+
+    # Calculate match rate
+    total_expected = len(mapping)
+    match_rate = matched / total_expected if total_expected > 0 else 0.0
+
+    # Load weights
+    missing_after_load, unexpected = our_model.load_state_dict(new_state_dict, strict=False)
+
+    # Report results
+    print(f"✅ Successfully loaded {matched}/{total_expected} weights ({match_rate:.1%})")
+
+    if missing_after_load:
+        # Filter out expected missing keys (RoPE buffers)
+        rope_buffers = [k for k in missing_after_load if 'cos' in k or 'sin' in k]
+        other_missing = [k for k in missing_after_load if k not in rope_buffers]
+        if rope_buffers:
+            print(f"   Note: {len(rope_buffers)} RoPE buffers not in checkpoint (expected)")
+        if other_missing:
+            print(f"   Warning: {len(other_missing)} unexpected missing keys: {other_missing[:5]}")
+
+    if missing_in_hf:
+        print(f"❌ {len(missing_in_hf)} keys missing in HuggingFace model:")
+        for key in missing_in_hf[:5]:
+            print(f"     - {key}")
+        if len(missing_in_hf) > 5:
+            print(f"     ... and {len(missing_in_hf) - 5} more")
+
+    if missing_in_ours:
+        print(f"❌ {len(missing_in_ours)} keys missing in our model:")
+        for key in missing_in_ours[:5]:
+            print(f"     - {key}")
+        if len(missing_in_ours) > 5:
+            print(f"     ... and {len(missing_in_ours) - 5} more")
+
     if shape_mismatches:
-        print(f"❌ {len(shape_mismatches)} shape mismatches!")
+        print(f"❌ {len(shape_mismatches)} shape mismatches:")
         for m in shape_mismatches[:5]:
-            print(f"     {m['key']}: HF={m['hf_shape']} vs Ours={m['our_shape']}")
-    
-    if matched == len(mapping):
+            print(f"     {m['our_key']}: HF={m['hf_shape']} vs Ours={m['our_shape']}")
+        if len(shape_mismatches) > 5:
+            print(f"     ... and {len(shape_mismatches) - 5} more")
+
+    # Strict threshold check
+    if match_rate < strict_threshold:
+        error_msg = (
+            f"Weight loading failed: {match_rate:.1%} matched, "
+            f"but {strict_threshold:.0%} required.\n"
+            f"  - Missing in HF: {len(missing_in_hf)}\n"
+            f"  - Missing in model: {len(missing_in_ours)}\n"
+            f"  - Shape mismatches: {len(shape_mismatches)}"
+        )
+        raise WeightLoadingError(error_msg)
+
+    if matched == total_expected:
         print("\n🎉 All weights loaded successfully!")
-    
+
     return our_model
 
 
