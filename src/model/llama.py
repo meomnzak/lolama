@@ -3,8 +3,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import List, Optional
 
 from .config import LlamaConfig
+from .kv_cache import KVCache
 from .layers import LlamaBlock, RMSNorm
 from ..utils.rope import precompute_rope_frequencies
 
@@ -49,51 +51,168 @@ class Llama(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
-    def forward(self, input_ids, use_cache=False, past_kv=None):
+    def create_kv_caches(
+        self,
+        batch_size: int,
+        max_seq_len: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> List[KVCache]:
+        """Create pre-allocated KV caches for all layers.
+        
+        Args:
+            batch_size: Batch size
+            max_seq_len: Max sequence length (defaults to config.max_seq_len)
+            device: Device for caches (defaults to model device)
+            dtype: dtype for caches (defaults to model dtype)
+        
+        Returns:
+            List of KVCache, one per layer
+        """
+        if max_seq_len is None:
+            max_seq_len = self.config.max_seq_len
+        if device is None:
+            device = self.embed_tokens.weight.device
+        if dtype is None:
+            dtype = self.embed_tokens.weight.dtype
+        
+        head_dim = self.config.d_model // self.config.num_heads
+        
+        return [
+            KVCache(
+                batch_size=batch_size,
+                max_seq_len=max_seq_len,
+                num_kv_heads=self.config.num_kv_heads,
+                head_dim=head_dim,
+                device=device,
+                dtype=dtype,
+            )
+            for _ in range(self.config.num_layers)
+        ]
+    
+    def forward(self, input_ids, kv_caches: Optional[List[KVCache]] = None):
+        """
+        Args:
+            input_ids: (B, L) input token IDs
+            kv_caches: Optional List[KVCache] for generation (updated in-place)
+        
+        Returns:
+            logits: (B, L, vocab_size)
+        """
         B, L = input_ids.shape
         x = self.embed_tokens(input_ids)
         
+        # Determine past length for causal mask
+        past_len = kv_caches[0].seq_len if kv_caches is not None else 0
+        
         # Causal mask
-        if past_kv is not None:
-            past_len = past_kv[0][0].size(2)
-            mask = torch.ones(L, past_len + L, device=x.device)
+        if past_len > 0:
+            mask = torch.ones(L, past_len + L, device=x.device, dtype=x.dtype)
             mask = torch.tril(mask, diagonal=past_len)
         else:
-            mask = torch.tril(torch.ones(L, L, device=x.device))
+            mask = torch.tril(torch.ones(L, L, device=x.device, dtype=x.dtype))
         mask = mask.unsqueeze(0).unsqueeze(0)
         
-        # Transformer layers (pass shared RoPE cos/sin)
-        new_kv = []
+        # Transformer layers (KV caches updated in-place)
         for i, layer in enumerate(self.layers):
-            layer_past = past_kv[i] if past_kv is not None else None
-            x, kv = layer(x, self.cos, self.sin, mask, layer_past)
-            if use_cache:
-                new_kv.append(kv)
+            layer_cache = kv_caches[i] if kv_caches is not None else None
+            x = layer(x, self.cos, self.sin, mask, layer_cache)
         
         x = self.norm(x)
         logits = self.lm_head(x)
         
-        if use_cache:
-            return logits, new_kv
         return logits
     
     @torch.no_grad()
-    def generate(self, input_ids, max_new_tokens=50, temperature=1.0, top_k=None):
-        """Autoregressive text generation."""
+    def generate(
+        self,
+        input_ids,
+        max_new_tokens=50,
+        temperature=1.0,
+        top_k=None,
+        top_p=None,
+        do_sample=True,
+        eos_token_id=None,
+        repetition_penalty=1.0,
+    ):
+        """Autoregressive text generation with pre-allocated KV cache.
+        
+        Args:
+            input_ids: Input token IDs (B, L)
+            max_new_tokens: Number of tokens to generate
+            temperature: Sampling temperature (ignored if do_sample=False)
+            top_k: Top-k sampling (ignored if do_sample=False)
+            top_p: Nucleus sampling threshold (ignored if do_sample=False)
+            do_sample: If False, use greedy decoding (deterministic)
+            eos_token_id: Stop generation when this token is produced
+            repetition_penalty: Penalty for repeating tokens (1.0 = no penalty)
+        """
         self.eval()
-        logits, kv_cache = self(input_ids, use_cache=True)
+        batch_size = input_ids.shape[0]
+        prompt_len = input_ids.shape[1]
+        
+        # Track which sequences have finished (hit eos)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+        
+        # Create pre-allocated KV cache
+        kv_caches = self.create_kv_caches(
+            batch_size=batch_size,
+            max_seq_len=prompt_len + max_new_tokens,
+        )
+        
+        # Initial forward pass (populates cache)
+        logits = self(input_ids, kv_caches=kv_caches)
         
         for _ in range(max_new_tokens):
-            next_logits = logits[:, -1, :] / temperature
+            next_logits = logits[:, -1, :]
             
-            if top_k is not None:
-                v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
-                next_logits[next_logits < v[:, [-1]]] = float('-inf')
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                for i in range(batch_size):
+                    for token_id in input_ids[i].unique():
+                        next_logits[i, token_id] /= repetition_penalty
             
-            probs = F.softmax(next_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+            if do_sample:
+                # Sampling with temperature
+                next_logits = next_logits / temperature
+                
+                # Top-k filtering
+                if top_k is not None:
+                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
+                
+                # Top-p (nucleus) filtering
+                if top_p is not None:
+                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    
+                    # Remove tokens with cumulative probability above threshold
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    # Keep at least one token
+                    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+                    sorted_indices_to_remove[:, 0] = False
+                    
+                    # Scatter back to original indexing
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        1, sorted_indices, sorted_indices_to_remove
+                    )
+                    next_logits[indices_to_remove] = float('-inf')
+                
+                probs = F.softmax(next_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                # Greedy decoding - just take argmax
+                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            
             input_ids = torch.cat([input_ids, next_token], dim=1)
-            logits, kv_cache = self(next_token, use_cache=True, past_kv=kv_cache)
+            
+            # Check for EOS token
+            if eos_token_id is not None:
+                finished = finished | (next_token.squeeze(-1) == eos_token_id)
+                if finished.all():
+                    break
+            
+            logits = self(next_token, kv_caches=kv_caches)
         
         return input_ids
     

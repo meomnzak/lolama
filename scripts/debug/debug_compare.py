@@ -46,7 +46,7 @@ print("=" * 60)
 
 hf_model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
-    torch_dtype=torch.float16,
+    dtype=torch.float16,
     low_cpu_mem_usage=True
 ).to(device)
 hf_model.eval()
@@ -55,9 +55,7 @@ with torch.no_grad():
     hf_output = hf_model.generate(
         input_ids,
         max_new_tokens=30,
-        temperature=0.8,
-        top_k=50,
-        do_sample=True,
+        do_sample=False,  # Greedy decoding - no randomness
         pad_token_id=tokenizer.pad_token_id,
     )
 
@@ -98,8 +96,7 @@ with torch.no_grad():
     our_output = our_model.generate(
         input_ids,
         max_new_tokens=30,
-        temperature=0.8,
-        top_k=50,
+        do_sample=False,  # Greedy decoding - no randomness
     )
 
 our_text = tokenizer.decode(our_output[0], skip_special_tokens=True)

@@ -230,13 +230,15 @@ def create_config_from_hf(hf_model_name, trust_remote_code=False, local_files_on
     return config
 
 
-def load_model(model_name_or_path, device="cpu"):
+def load_model(model_name_or_path, device="cpu", dtype=torch.float16, compile_model=False):
     """
     Load a pretrained model from HuggingFace.
     
     Args:
         model_name_or_path: HuggingFace model name or local path
         device: Device to load on
+        dtype: Model dtype (default: float16 to match HF models)
+        compile_model: If True, use torch.compile() for speedup (requires PyTorch 2.0+)
     
     Returns:
         Llama model with loaded weights
@@ -266,9 +268,11 @@ def load_model(model_name_or_path, device="cpu"):
     
     print("Creating model architecture...")
     our_model = Llama(config, init_weights=False)  # Skip random init, we're loading weights
+    our_model = our_model.to(dtype)  # Convert to target dtype before loading weights
     
     total_params = sum(p.numel() for p in our_model.parameters())
     print(f"  Total parameters: {total_params:,}")
+    print(f"  dtype: {dtype}")
     print()
     
     if source["local_path"] is not None:
@@ -296,6 +300,11 @@ def load_model(model_name_or_path, device="cpu"):
     
     print(f"\nMoving model to {device}...")
     our_model = our_model.to(device)
+    
+    # Optional: torch.compile() for speedup (PyTorch 2.0+)
+    if compile_model:
+        print("Compiling model with torch.compile()...")
+        our_model = torch.compile(our_model)
     
     print("\n" + "=" * 60)
     print("Model ready!")

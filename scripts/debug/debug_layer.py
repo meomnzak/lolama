@@ -24,7 +24,7 @@ print(f"Input: {input_ids}")
 print("\nLoading HF model...")
 hf_model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
-    torch_dtype=torch.float32,  # Use fp32 for comparison
+    dtype=torch.float32,  # Use fp32 for comparison
     low_cpu_mem_usage=True
 ).to(device)
 hf_model.eval()
