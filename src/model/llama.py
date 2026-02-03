@@ -99,24 +99,13 @@ class Llama(nn.Module):
         Returns:
             logits: (B, L, vocab_size)
         """
-        B, L = input_ids.shape
         x = self.embed_tokens(input_ids)
         
-        # Determine past length for causal mask
-        past_len = kv_caches[0].seq_len if kv_caches is not None else 0
-        
-        # Causal mask
-        if past_len > 0:
-            mask = torch.ones(L, past_len + L, device=x.device, dtype=x.dtype)
-            mask = torch.tril(mask, diagonal=past_len)
-        else:
-            mask = torch.tril(torch.ones(L, L, device=x.device, dtype=x.dtype))
-        mask = mask.unsqueeze(0).unsqueeze(0)
-        
         # Transformer layers (KV caches updated in-place)
+        # Causal masking handled by Flash Attention's is_causal flag
         for i, layer in enumerate(self.layers):
             layer_cache = kv_caches[i] if kv_caches is not None else None
-            x = layer(x, self.cos, self.sin, mask, layer_cache)
+            x = layer(x, self.cos, self.sin, kv_cache=layer_cache)
         
         x = self.norm(x)
         logits = self.lm_head(x)
@@ -215,6 +204,93 @@ class Llama(nn.Module):
             logits = self(next_token, kv_caches=kv_caches)
         
         return input_ids
+    
+    @torch.no_grad()
+    def generate_stream(
+        self,
+        input_ids,
+        max_new_tokens=50,
+        temperature=1.0,
+        top_k=None,
+        top_p=None,
+        do_sample=True,
+        eos_token_id=None,
+        repetition_penalty=1.0,
+    ):
+        """Streaming text generation - yields tokens as they're generated.
+        
+        Args:
+            input_ids: Input token IDs (B, L)
+            max_new_tokens: Number of tokens to generate
+            temperature: Sampling temperature (ignored if do_sample=False)
+            top_k: Top-k sampling (ignored if do_sample=False)
+            top_p: Nucleus sampling threshold (ignored if do_sample=False)
+            do_sample: If False, use greedy decoding (deterministic)
+            eos_token_id: Stop generation when this token is produced
+            repetition_penalty: Penalty for repeating tokens (1.0 = no penalty)
+        
+        Yields:
+            int: Token ID for each generated token
+        """
+        self.eval()
+        batch_size = input_ids.shape[0]
+        prompt_len = input_ids.shape[1]
+        
+        if batch_size != 1:
+            raise ValueError("Streaming only supports batch_size=1")
+        
+        # Create pre-allocated KV cache
+        kv_caches = self.create_kv_caches(
+            batch_size=batch_size,
+            max_seq_len=prompt_len + max_new_tokens,
+        )
+        
+        # Initial forward pass (populates cache)
+        logits = self(input_ids, kv_caches=kv_caches)
+        
+        for _ in range(max_new_tokens):
+            next_logits = logits[:, -1, :]
+            
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                for token_id in input_ids[0].unique():
+                    next_logits[0, token_id] /= repetition_penalty
+            
+            if do_sample:
+                # Sampling with temperature
+                next_logits = next_logits / temperature
+                
+                # Top-k filtering
+                if top_k is not None:
+                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
+                
+                # Top-p (nucleus) filtering
+                if top_p is not None:
+                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+                    sorted_indices_to_remove[:, 0] = False
+                    indices_to_remove = sorted_indices_to_remove.scatter(
+                        1, sorted_indices, sorted_indices_to_remove
+                    )
+                    next_logits[indices_to_remove] = float('-inf')
+                
+                probs = F.softmax(next_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            
+            token_id = next_token.item()
+            yield token_id
+            
+            # Check for EOS token
+            if eos_token_id is not None and token_id == eos_token_id:
+                break
+            
+            input_ids = torch.cat([input_ids, next_token], dim=1)
+            logits = self(next_token, kv_caches=kv_caches)
     
     def count_parameters(self):
         """Count model parameters."""

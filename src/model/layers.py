@@ -10,7 +10,6 @@ Contains only nn.Module classes:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 from typing import Optional
 
 from .config import LlamaConfig
@@ -38,7 +37,7 @@ class RMSNorm(nn.Module):
 
 
 class LlamaAttention(nn.Module):
-    """Multi-head attention with RoPE and Grouped Query Attention (GQA)."""
+    """Multi-head attention with RoPE, GQA, and Flash Attention."""
     
     def __init__(self, config: LlamaConfig):
         super().__init__()
@@ -63,14 +62,12 @@ class LlamaAttention(nn.Module):
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
         """
         Args:
             x: Input tensor (B, L, d_model)
             cos, sin: RoPE frequencies from parent model
-            mask: Causal attention mask
             kv_cache: Optional KVCache for generation (updated in-place)
         """
         B, L, _ = x.shape
@@ -80,26 +77,32 @@ class LlamaAttention(nn.Module):
         K = self.k_proj(x).view(B, L, self.num_kv_heads, self.head_dim).transpose(1, 2)
         V = self.v_proj(x).view(B, L, self.num_kv_heads, self.head_dim).transpose(1, 2)
         
-        # Apply RoPE and handle KV cache
+        # Apply RoPE with position offset from cache
+        offset = kv_cache.seq_len if kv_cache is not None else 0
+        Q = apply_rope(Q, cos[offset:offset+L], sin[offset:offset+L])
+        K = apply_rope(K, cos[offset:offset+L], sin[offset:offset+L])
+        
+        # Update KV cache (if provided)
         if kv_cache is not None:
-            offset = kv_cache.seq_len
-            Q = apply_rope(Q, cos[offset:offset+L], sin[offset:offset+L])
-            K = apply_rope(K, cos[offset:offset+L], sin[offset:offset+L])
             K, V = kv_cache.update(K, V)
-        else:
-            Q = apply_rope(Q, cos[:L], sin[:L])
-            K = apply_rope(K, cos[:L], sin[:L])
+        
+        # Causal masking logic:
+        # - Prefill (L > 1): need causal mask so tokens only attend to previous positions
+        # - Generation (L == 1 with cache): single new token attends to all cached tokens
+        is_causal = (L > 1)
         
         # Expand K/V heads for GQA
         K = repeat_kv(K, self.n_rep)
         V = repeat_kv(V, self.n_rep)
         
-        # Scaled dot-product attention
-        scores = Q @ K.transpose(-2, -1) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
-        attn = F.softmax(scores, dim=-1)
-        out = attn @ V
+        # Flash Attention via PyTorch's scaled_dot_product_attention
+        # Automatically uses Flash Attention on CUDA, memory-efficient attention elsewhere
+        out = F.scaled_dot_product_attention(
+            Q, K, V,
+            attn_mask=None,
+            is_causal=is_causal,
+            dropout_p=0.0,
+        )
         
         out = out.transpose(1, 2).contiguous().view(B, L, self.d_model)
         return self.o_proj(out)
@@ -133,11 +136,10 @@ class LlamaBlock(nn.Module):
         x: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
         """KV cache is updated in-place if provided."""
-        attn_out = self.attention(self.attention_norm(x), cos, sin, mask, kv_cache)
+        attn_out = self.attention(self.attention_norm(x), cos, sin, kv_cache=kv_cache)
         x = x + attn_out
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
