@@ -31,11 +31,21 @@ def resolve_model_source(model_name_or_path: str) -> dict[str, str | Path | bool
     key = model_name_or_path.lower()
     if key in MODEL_REGISTRY:
         info = MODEL_REGISTRY[key]
+        # Preferred location: registry folder name
         local_path = WEIGHTS_DIR / info["folder"]
+        if not local_path.exists():
+            # Fallback: auto-saved folder from HF name
+            auto_folder = info["hf_name"].replace("/", "_").replace("\\", "_")
+            auto_path = WEIGHTS_DIR / auto_folder
+            if auto_path.exists() and any(auto_path.iterdir()):
+                local_path = auto_path
+            else:
+                local_path = None
         return {
-            "local_path": local_path if local_path.exists() else None,
+            "local_path": local_path,
             "hf_name": info["hf_name"],
             "trust_remote_code": info["trust_remote_code"],
+            "folder": info["folder"],
         }
 
     # Check if previously auto-saved to weights/ (e.g. openlm-research/open_llama_3b_v2
@@ -364,7 +374,8 @@ def load_model(
     # Auto-download to weights/ if not found locally
     if source["local_path"] is None and source["hf_name"] is not None:
         hf_name = source["hf_name"]
-        folder_name = hf_name.replace("/", "_").replace("\\", "_")
+        # Use registry folder name when available, otherwise derive from HF name
+        folder_name = source.get("folder") or hf_name.replace("/", "_").replace("\\", "_")
         save_dir = WEIGHTS_DIR / folder_name
         if not (save_dir.exists() and any(save_dir.iterdir())):
             download_model(hf_name, save_dir, trust_remote_code)
