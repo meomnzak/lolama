@@ -136,9 +136,9 @@ def _load_generator(args: argparse.Namespace):
 
     def respond(prompt: str, stream: bool) -> None:
         input_ids = tokenize_prompt(prompt)
-        logger.debug(f"Input tokens: {input_ids.shape[1]}, device: {input_ids.device}")
-        logger.debug(f"Params: max_tokens={args.max_tokens}, temp={args.temperature}, "
-                      f"top_p={args.top_p}, rep_penalty={args.repetition_penalty}")
+        logger.info(f"Input tokens: {input_ids.shape[1]}, device: {input_ids.device}")
+        logger.info(f"Params: max_tokens={args.max_tokens}, temp={args.temperature}, "
+                     f"top_p={args.top_p}, rep_penalty={args.repetition_penalty}")
         if stream:
             generated_tokens: list[int] = []
             prev_text = ""
