@@ -15,7 +15,7 @@
 - **Efficient Inference** — KV caching and streaming generation for fast token output
 - **Int8 Quantization** — ~4x memory reduction with weight-only quantization
 - **Multi-Device Support** — CUDA, Apple Silicon (MPS), and CPU backends
-- **Unified CLI** — Download, generate, and quantize models from the command line
+- **Unified CLI** — Generate, chat, and quantize models from the command line
 
 ---
 
@@ -78,6 +78,14 @@ Models are downloaded automatically on first use — you'll be prompted to confi
 
 ## CLI Reference
 
+### Global Options
+
+```
+  -v, --verbose    Show model loading details
+  --debug          Show all debug output
+  -V, --version    Show version
+```
+
 ### `lolama models`
 
 List available model aliases.
@@ -88,13 +96,13 @@ lolama models
 
 ### `lolama generate`
 
-Generate text from a prompt.
+Generate text from a prompt. Streams by default.
 
 ```bash
 lolama generate [OPTIONS] [PROMPT]
 
 Options:
-  -m, --model TEXT             Model alias, HF name, or local path (default: tinyllama)
+  -m, --model TEXT             Model alias or local path (default: tinyllama)
   --max-tokens INT             Maximum tokens to generate (default: 256)
   --temperature FLOAT          Sampling temperature (default: 0.7)
   --top-p FLOAT                Nucleus sampling threshold (default: 0.9)
@@ -117,6 +125,9 @@ lolama generate --quantize "Explain quantum computing"
 
 # Pipe input from stdin
 echo "Explain transformers" | lolama generate
+
+# Debug model loading
+lolama -v generate "hello"
 ```
 
 ### `lolama chat`
@@ -127,7 +138,7 @@ Interactive chat session (REPL). Streams by default.
 lolama chat [OPTIONS]
 
 Options:
-  -m, --model TEXT             Model alias, HF name, or local path (default: tinyllama)
+  -m, --model TEXT             Model alias or local path (default: tinyllama)
   --max-tokens INT             Maximum tokens per response (default: 256)
   --temperature FLOAT          Sampling temperature (default: 0.7)
   --top-p FLOAT                Nucleus sampling threshold (default: 0.9)

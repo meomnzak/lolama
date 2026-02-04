@@ -73,13 +73,14 @@ def _load_generator(args: argparse.Namespace):
         load_quantized_model,
         is_quantized_model_dir,
     )
-    from .utils import resolve_device
+    from .utils import resolve_device, get_logger
+
+    logger = get_logger("lolama.cli")
 
     _confirm_download(args.model)
 
     device = resolve_device()
-    print(f"Device: {device}")
-    print()
+    logger.info(f"Device: {device}")
 
     weights_dir = Path(__file__).parent.parent / "weights"
     model_path = args.model
@@ -92,31 +93,36 @@ def _load_generator(args: argparse.Namespace):
     quantized_dir = get_quantized_dir(model_path)
 
     if args.quantize and is_quantized_model_dir(str(quantized_dir)):
-        print(f"Found saved quantized model: {quantized_dir}/")
+        logger.info(f"Found saved quantized model: {quantized_dir}/")
         model = load_model(model_path, device="cpu")
+        logger.info("Applying int8 quantization structure...")
         quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"])
+        logger.info("Loading quantized weights...")
         load_quantized_model(str(quantized_dir), model)
+        logger.info(f"Moving model to {device}...")
         model = model.to(device)
-        print(f"Model size: {get_model_size_mb(model):.1f} MB")
+        logger.info(f"Model size: {get_model_size_mb(model):.1f} MB")
     elif args.quantize:
         model = load_model(model_path, device=device)
         size_before = get_model_size_mb(model)
-        print(f"Quantizing model (before: {size_before:.1f} MB)...")
+        logger.info(f"Quantizing model (before: {size_before:.1f} MB)...")
         quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"])
         source = resolve_model_source(model_path)
         source_dir = source["local_path"]
-        print(f"\nSaving quantized model to {quantized_dir}/")
+        logger.info(f"Saving quantized model to {quantized_dir}/")
         save_quantized_model(model, str(quantized_dir), str(source_dir) if source_dir else None)
-        print(f"\nModel size: {get_model_size_mb(model):.1f} MB")
-        print()
+        logger.info(f"Model size after quantization: {get_model_size_mb(model):.1f} MB")
     else:
         model = load_model(model_path, device=device)
 
+    logger.info("Loading tokenizer...")
     tokenizer = load_tokenizer(model_path)
+    logger.info("Creating text generator...")
     generator = TextGenerator(model)
 
     def tokenize_prompt(prompt: str) -> torch.Tensor:
         if getattr(tokenizer, "chat_template", None):
+            logger.debug("Applying chat template")
             messages = [{"role": "user", "content": prompt}]
             input_ids = tokenizer.apply_chat_template(
                 messages, return_tensors="pt", add_generation_prompt=True
@@ -126,8 +132,13 @@ def _load_generator(args: argparse.Namespace):
             return input_ids.to(device)
         return tokenizer.encode(prompt, return_tensors="pt").to(device)
 
+    logger.info("Ready.")
+
     def respond(prompt: str, stream: bool) -> None:
         input_ids = tokenize_prompt(prompt)
+        logger.debug(f"Input tokens: {input_ids.shape[1]}, device: {input_ids.device}")
+        logger.debug(f"Params: max_tokens={args.max_tokens}, temp={args.temperature}, "
+                      f"top_p={args.top_p}, rep_penalty={args.repetition_penalty}")
         if stream:
             generated_tokens: list[int] = []
             prev_text = ""
@@ -230,12 +241,14 @@ def main() -> None:
         description="LLaMA from scratch in PyTorch",
     )
     parser.add_argument("-V", "--version", action="version", version=f"lolama {_get_version()}")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show model loading details")
+    parser.add_argument("--debug", action="store_true", help="Show all debug output")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # Shared sampling options for generate and chat
     def add_model_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("-m", "--model", default="tinyllama",
-                       help="Model alias, HF name, or local path (default: tinyllama)")
+                       help="Model alias or local path (default: tinyllama)")
         p.add_argument("--no-stream", action="store_true", help="Disable streaming (wait for full response)")
         p.add_argument("--quantize", action="store_true", help="Use int8 quantization")
         p.add_argument("--max-tokens", type=int, default=256, help="Max new tokens to generate")
@@ -259,6 +272,16 @@ def main() -> None:
     models_parser.set_defaults(func=cmd_models)
 
     args = parser.parse_args()
+
+    # Configure logging level
+    import logging
+    from .utils import set_verbosity
+    if args.debug:
+        set_verbosity(logging.DEBUG)
+    elif args.verbose:
+        set_verbosity(logging.INFO)
+    else:
+        set_verbosity(logging.WARNING)
 
     if args.command is None:
         parser.print_help()
