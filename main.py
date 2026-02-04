@@ -32,7 +32,6 @@ def main() -> None:
         
         model_map = {
             "tinyllama": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-            "phi2": "microsoft/phi-2",
         }
         
         hf_name = model_map.get(model_name, model_name)

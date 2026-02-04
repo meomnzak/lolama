@@ -109,6 +109,9 @@ class Sampler:
             for token_id in unique_tokens:
                 if ignore_token_id is not None and token_id == ignore_token_id:
                     continue
-                logits[i, token_id] /= penalty
+                if logits[i, token_id] > 0:
+                    logits[i, token_id] /= penalty
+                else:
+                    logits[i, token_id] *= penalty
         
         return logits

@@ -295,7 +295,7 @@ def main() -> None:
 
     # download
     dl_parser = subparsers.add_parser("download", help="Download a model from HuggingFace")
-    dl_parser.add_argument("model", help="Model key (tinyllama, phi2, llama7b)")
+    dl_parser.add_argument("model", help="Model key (tinyllama, open_llama_3b, open_llama_7b, llama7b)")
     dl_parser.add_argument("--from-cache", action="store_true", help="Only use local HF cache")
     dl_parser.set_defaults(func=cmd_download)
 

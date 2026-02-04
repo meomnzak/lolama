@@ -6,7 +6,6 @@ Downloads models from HuggingFace and saves to weights/ directory.
 
 Usage:
     python scripts/download.py tinyllama
-    python scripts/download.py phi2
     python scripts/download.py llama7b
     python scripts/download.py --from-cache tinyllama
 """
@@ -28,10 +27,15 @@ MODELS = {
         "folder": "tinyllama-1.1b",
         "trust_remote_code": False,
     },
-    "phi2": {
-        "hf_name": "microsoft/phi-2",
-        "folder": "phi-2",
-        "trust_remote_code": True,
+    "open_llama_3b": {
+        "hf_name": "openlm-research/open_llama_3b_v2",
+        "folder": "open-llama-3b",
+        "trust_remote_code": False,
+    },
+    "open_llama_7b": {
+        "hf_name": "openlm-research/open_llama_7b_v2",
+        "folder": "open-llama-7b",
+        "trust_remote_code": False,
     },
     "llama7b": {
         "hf_name": "meta-llama/Llama-2-7b-hf",

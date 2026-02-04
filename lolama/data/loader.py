@@ -38,7 +38,18 @@ def resolve_model_source(model_name_or_path: str) -> dict[str, str | Path | bool
             "trust_remote_code": info["trust_remote_code"],
         }
 
-    # Fallback: treat as HF name
+    # Check if previously auto-saved to weights/ (e.g. openlm-research/open_llama_3b_v2
+    # -> weights/openlm-research_open_llama_3b_v2/)
+    auto_folder = model_name_or_path.replace("/", "_").replace("\\", "_")
+    auto_path = WEIGHTS_DIR / auto_folder
+    if auto_path.exists() and any(auto_path.iterdir()):
+        return {
+            "local_path": auto_path,
+            "hf_name": model_name_or_path,
+            "trust_remote_code": False,
+        }
+
+    # Fallback: treat as HF name (will be auto-downloaded and saved on first use)
     return {
         "local_path": None,
         "hf_name": model_name_or_path,
@@ -279,6 +290,37 @@ def create_config_from_hf(
     return config
 
 
+def _save_hf_model_locally(
+    hf_name: str,
+    save_dir: Path,
+    trust_remote_code: bool = False,
+) -> None:
+    """Download and save HF model + tokenizer to local weights/ directory."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Downloading {hf_name} to {save_dir}...")
+
+    # Download model
+    try:
+        hf_model = _try_from_pretrained(hf_name, trust_remote_code, local_files_only=True)
+    except OSError:
+        hf_model = _try_from_pretrained(hf_name, trust_remote_code, local_files_only=False)
+
+    hf_model.save_pretrained(save_dir)
+
+    # Download tokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(hf_name, trust_remote_code=trust_remote_code, local_files_only=True)
+    except OSError:
+        tokenizer = AutoTokenizer.from_pretrained(hf_name, trust_remote_code=trust_remote_code, local_files_only=False)
+
+    tokenizer.save_pretrained(save_dir)
+
+    total_params = sum(p.numel() for p in hf_model.parameters())
+    size_mb = total_params * 2 / 1024**2
+    logger.info(f"Saved to {save_dir} ({total_params:,} params, {size_mb:.1f} MB fp16)")
+
+
 def load_model(
     model_name_or_path: str,
     device: str | None = None,
@@ -286,6 +328,9 @@ def load_model(
     compile_model: bool = False,
 ) -> Llama:
     """Load a pretrained model from HuggingFace.
+
+    If weights are not found locally, downloads and saves them to the
+    weights/ directory for future use (no reliance on HF cache).
 
     Args:
         model_name_or_path: HuggingFace model name or local path
@@ -304,22 +349,24 @@ def load_model(
     logger.info(f"Loading model: {model_name_or_path}")
 
     source = resolve_model_source(model_name_or_path)
-    model_path = source["local_path"] if source["local_path"] is not None else source["hf_name"]
     trust_remote_code = source["trust_remote_code"]
 
-    # Try local cache first, then download if needed
-    try:
-        config = create_config_from_hf(
-            model_path,
-            trust_remote_code=trust_remote_code,
-            local_files_only=source["local_path"] is None,
-        )
-    except OSError:
-        config = create_config_from_hf(
-            model_path,
-            trust_remote_code=trust_remote_code,
-            local_files_only=False,
-        )
+    # Auto-download to weights/ if not found locally
+    if source["local_path"] is None and source["hf_name"] is not None:
+        hf_name = source["hf_name"]
+        folder_name = hf_name.replace("/", "_").replace("\\", "_")
+        save_dir = WEIGHTS_DIR / folder_name
+        if not (save_dir.exists() and any(save_dir.iterdir())):
+            _save_hf_model_locally(hf_name, save_dir, trust_remote_code)
+        source["local_path"] = save_dir
+
+    model_path = source["local_path"] if source["local_path"] is not None else source["hf_name"]
+
+    config = create_config_from_hf(
+        model_path,
+        trust_remote_code=trust_remote_code,
+        local_files_only=True,
+    )
 
     logger.info("Creating model architecture...")
     # Use meta device to skip weight initialization entirely (much faster)
@@ -335,28 +382,12 @@ def load_model(
     total_params: int = sum(p.numel() for p in our_model.parameters())
     logger.info(f"Total parameters: {total_params:,}, dtype: {dtype}")
 
-    if source["local_path"] is not None:
-        our_model = load_weights_from_hf(
-            our_model,
-            model_path,
-            trust_remote_code=trust_remote_code,
-            local_files_only=True,
-        )
-    else:
-        try:
-            our_model = load_weights_from_hf(
-                our_model,
-                model_path,
-                trust_remote_code=trust_remote_code,
-                local_files_only=True,
-            )
-        except OSError:
-            our_model = load_weights_from_hf(
-                our_model,
-                model_path,
-                trust_remote_code=trust_remote_code,
-                local_files_only=False,
-            )
+    our_model = load_weights_from_hf(
+        our_model,
+        model_path,
+        trust_remote_code=trust_remote_code,
+        local_files_only=True,
+    )
 
     # Move to target device (skip if already on CPU)
     if device != "cpu":

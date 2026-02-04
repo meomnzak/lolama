@@ -21,11 +21,19 @@ logger = get_model_logger()
 
 class QuantizedLinear(nn.Module):
     """Linear layer with int8 quantized weights.
-    
+
     Stores weights as int8 + scale, dequantizes during forward pass.
     Uses per-channel (per-output-feature) quantization for better accuracy.
+
+    Accelerated paths (selected automatically by device):
+      - MPS:  Metal fused W8A16 kernel (dequant in registers, never materializes fp16 in DRAM)
+      - CUDA: torch._int_mm W8A8 (dynamic activation quantization + int8 GEMM)
+      - CPU:  Naive dequant to fp16 + F.linear (fallback)
     """
-    
+
+    # Class-level backend cache: None (unchecked), "metal", "int_mm", or "naive"
+    _backend: dict[str, str] = {}
+
     def __init__(
         self,
         in_features: int,
@@ -37,19 +45,19 @@ class QuantizedLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.dtype = dtype
-        
+
         # Quantized weights: int8
         self.register_buffer(
             'weight_int8',
             torch.zeros(out_features, in_features, dtype=torch.int8)
         )
-        
+
         # Scale per output channel for dequantization
         self.register_buffer(
             'weight_scale',
             torch.ones(out_features, dtype=dtype)
         )
-        
+
         # Optional bias (not quantized)
         if bias:
             self.register_buffer('bias', torch.zeros(out_features, dtype=dtype))
@@ -100,18 +108,91 @@ class QuantizedLinear(nn.Module):
         # Move entire module to original device
         return qlayer.to(device)
     
+    @classmethod
+    def _resolve_backend(cls, device: torch.device) -> str:
+        """Resolve the best backend for a device type (cached per device type)."""
+        device_type: str = str(device.type)
+        if device_type in cls._backend:
+            return cls._backend[device_type]
+
+        backend = "naive"
+
+        if device_type == "mps":
+            try:
+                from ..metal import is_available
+                if is_available():
+                    backend = "metal"
+                    logger.info("Using Metal fused W8A16 kernel")
+            except Exception:
+                pass
+        elif device_type == "cuda":
+            if hasattr(torch, "_int_mm"):
+                backend = "int_mm"
+                logger.info("Using torch._int_mm W8A8 kernel")
+
+        cls._backend[device_type] = backend
+        return backend
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with on-the-fly dequantization."""
+        """Forward pass with on-the-fly dequantization.
+
+        Dispatches to the best available backend:
+          1. Cached fp16 weights (--fast mode)
+          2. Metal fused W8A16 kernel (MPS)
+          3. torch._int_mm W8A8 (CUDA)
+          4. Naive dequant + F.linear (CPU / fallback)
+        """
         # Use cached dequantized weights if available
         if hasattr(self, '_cached_weight') and self._cached_weight is not None:
             return F.linear(x, self._cached_weight, self.bias)
-        
-        # Dequantize weights: weight = weight_int8 * scale
-        # Use float32 for dequantization to avoid precision issues, then convert
+
+        backend: str = self._resolve_backend(self.weight_int8.device)
+
+        if backend == "metal":
+            return self._forward_metal(x)
+        if backend == "int_mm":
+            return self._forward_int_mm(x)
+        return self._forward_naive(x)
+
+    def _forward_naive(self, x: torch.Tensor) -> torch.Tensor:
+        """Naive dequant to fp16 + F.linear (CPU / fallback)."""
         weight_f32: torch.Tensor = self.weight_int8.float() * self.weight_scale.float().unsqueeze(1)
         weight: torch.Tensor = weight_f32.to(x.dtype)
-        
         return F.linear(x, weight, self.bias)
+
+    def _forward_metal(self, x: torch.Tensor) -> torch.Tensor:
+        """Metal fused W8A16 dequant+matmul (MPS)."""
+        from ..metal import dequant_matmul
+
+        out: torch.Tensor = dequant_matmul(x, self.weight_int8, self.weight_scale)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+    def _forward_int_mm(self, x: torch.Tensor) -> torch.Tensor:
+        """torch._int_mm W8A8 path (CUDA). Dynamic per-token activation quantization."""
+        # Flatten batched input [*, K] → [M, K]
+        orig_shape = x.shape
+        if x.dim() > 2:
+            x = x.reshape(-1, x.size(-1))
+
+        # Dynamic per-token activation quantization
+        x_scale: torch.Tensor = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
+        x_int8: torch.Tensor = (x / x_scale).round().clamp(-127, 127).to(torch.int8)
+
+        # int8 GEMM: [M, K] @ [K, N] → [M, N] int32
+        out_int32: torch.Tensor = torch._int_mm(x_int8, self.weight_int8.t())
+
+        # Rescale to original dtype
+        out: torch.Tensor = (out_int32.float() * x_scale * self.weight_scale.float().unsqueeze(0)).to(x.dtype)
+
+        # Restore batch dimensions
+        if len(orig_shape) > 2:
+            out = out.reshape(*orig_shape[:-1], out.size(-1))
+
+        if self.bias is not None:
+            out = out + self.bias
+        return out
     
     def dequantize_and_cache(self, dtype: torch.dtype = torch.float16) -> None:
         """Pre-dequantize weights and cache them for fast inference.
