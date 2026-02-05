@@ -13,7 +13,7 @@
 - **Pure PyTorch Implementation** — Complete LLaMA transformer built from scratch, no hidden abstractions
 - **Hugging Face Compatible** — Load pre-trained weights directly from the HF Hub
 - **Efficient Inference** — KV caching and streaming generation for fast token output
-- **Int8 Quantization** — ~4x memory reduction with weight-only quantization
+- **Int8 Quantization** — ~2x memory reduction with weight-only quantization (fp16 → int8)
 - **Multi-Device Support** — CUDA, Apple Silicon (MPS), and CPU backends
 - **Unified CLI** — Generate, chat, and quantize models from the command line
 
@@ -199,7 +199,7 @@ model = load_model("tinyllama")
 print(f"Original: {get_model_size_mb(model):.0f} MB")
 
 quantize_model_int8(model)
-print(f"Quantized: {get_model_size_mb(model):.0f} MB")  # ~4x smaller
+print(f"Quantized: {get_model_size_mb(model):.0f} MB")  # ~2x smaller (fp16 → int8)
 ```
 
 **How it works:**
