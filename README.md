@@ -203,10 +203,12 @@ print(f"Quantized: {get_model_size_mb(model):.0f} MB")  # ~4x smaller
 ```
 
 **How it works:**
-- Per-channel quantization of weight matrices
-- Scales stored as float16 for efficient dequantization
+- Per-channel absmax quantization of weight matrices (int8 + fp16 scale per output channel)
 - Embedding and LM head layers preserved at full precision
-- On-the-fly dequantization during forward pass
+- Device-specific accelerated backends selected automatically:
+  - **MPS (Apple Silicon)**: Metal fused W8A16 kernel — dequantization in GPU registers, no fp16 materialized in DRAM
+  - **CUDA**: `torch._int_mm` W8A8 — dynamic per-token activation quantization + int8 GEMM
+  - **CPU**: Naive dequant to fp16 fallback
 
 ---
 
