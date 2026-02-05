@@ -102,16 +102,13 @@ class Sampler:
         """
         if penalty == 1.0:
             return logits
-        
-        batch_size: int = logits.shape[0]
-        for i in range(batch_size):
-            unique_tokens: torch.Tensor = input_ids[i].unique()
-            for token_id in unique_tokens:
-                if ignore_token_id is not None and token_id == ignore_token_id:
-                    continue
-                if logits[i, token_id] > 0:
-                    logits[i, token_id] /= penalty
-                else:
-                    logits[i, token_id] *= penalty
-        
+
+        score: torch.Tensor = torch.gather(logits, 1, input_ids)
+        score = torch.where(score > 0, score / penalty, score * penalty)
+        if ignore_token_id is not None:
+            mask: torch.Tensor = input_ids == ignore_token_id
+            original: torch.Tensor = torch.gather(logits, 1, input_ids)
+            score = torch.where(mask, original, score)
+        logits.scatter_(1, input_ids, score)
+
         return logits

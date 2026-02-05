@@ -27,7 +27,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 WEIGHTS_DIR = PROJECT_ROOT / "weights"
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from lolama.data import load_model, load_tokenizer, resolve_model_source
+from lolama.data import create_model, load_model, load_tokenizer, resolve_model_source
 from lolama.model import (
     quantize_model_int8,
     dequantize_model_for_inference,
@@ -252,7 +252,7 @@ def main() -> None:
 
     if quantize and is_quantized_model_dir(str(quantized_dir)):
         print(f"Found saved quantized model: {quantized_dir}/")
-        model = load_model(model_path, device="cpu")
+        model = create_model(model_path)
         quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'])
         load_quantized_model(str(quantized_dir), model)
         model = model.to(device)

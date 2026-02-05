@@ -44,12 +44,18 @@ class KVCache:
             Full K, V tensors up to current position
         """
         new_len: int = k.shape[2]
-        
+        end: int = self.current_len + new_len
+
+        if end > self.max_seq_len:
+            raise RuntimeError(
+                f"KV cache overflow: {end} tokens exceeds max_seq_len={self.max_seq_len}"
+            )
+
         # Write new values into pre-allocated buffer
-        self.k_cache[:, :, self.current_len:self.current_len + new_len] = k
-        self.v_cache[:, :, self.current_len:self.current_len + new_len] = v
-        
-        self.current_len += new_len
+        self.k_cache[:, :, self.current_len:end] = k
+        self.v_cache[:, :, self.current_len:end] = v
+
+        self.current_len = end
         
         # Return view of cache up to current position
         return (

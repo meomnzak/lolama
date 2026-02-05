@@ -1,6 +1,7 @@
 """Data loading and tokenization."""
 
 from .loader import (
+    create_model,
     load_model,
     load_weights_from_hf,
     create_config_from_hf,
@@ -12,6 +13,7 @@ from .loader import (
 from .registry import MODEL_REGISTRY
 
 __all__ = [
+    'create_model',
     'load_model',
     'load_weights_from_hf',
     'create_config_from_hf',

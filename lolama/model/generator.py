@@ -176,11 +176,12 @@ class TextGenerator:
             next_token: torch.Tensor = sampler.sample(next_logits)
             
             token_id: int = next_token.item()
-            yield token_id
-            
-            # Check for EOS token
+
+            # Check for EOS token before yielding
             if config.eos_token_id is not None and token_id == config.eos_token_id:
                 break
+
+            yield token_id
             
             input_ids = torch.cat([input_ids, next_token], dim=1)
             logits = self.model(next_token, kv_caches=kv_caches)

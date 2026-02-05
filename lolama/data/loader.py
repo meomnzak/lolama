@@ -341,6 +341,42 @@ def download_model(
     logger.info(f"Saved to {save_dir} ({total_params:,} params, {size_mb:.1f} MB fp16)")
 
 
+def create_model(
+    model_name_or_path: str,
+    dtype: torch.dtype = torch.float16,
+) -> Llama:
+    """Create model architecture from config without loading weights.
+
+    Useful when you need the model structure (e.g., to load quantized
+    weights) without the cost of loading full HF weights.
+
+    Args:
+        model_name_or_path: HuggingFace model name or local path
+        dtype: Model dtype (default: float16)
+
+    Returns:
+        Llama model with empty weights (on CPU)
+    """
+    source = resolve_model_source(model_name_or_path)
+
+    model_path = source["local_path"] if source["local_path"] is not None else source["hf_name"]
+
+    config = create_config_from_hf(
+        model_path,
+        trust_remote_code=source["trust_remote_code"],
+        local_files_only=True,
+    )
+
+    logger.info("Creating model architecture...")
+    with torch.device('meta'):
+        model = Llama(config, init_weights=False)
+
+    model = model.to_empty(device='cpu').to(dtype)
+    model.init_rope()
+
+    return model
+
+
 def load_model(
     model_name_or_path: str,
     device: str | None = None,
@@ -383,22 +419,7 @@ def load_model(
 
     model_path = source["local_path"] if source["local_path"] is not None else source["hf_name"]
 
-    config = create_config_from_hf(
-        model_path,
-        trust_remote_code=trust_remote_code,
-        local_files_only=True,
-    )
-
-    logger.info("Creating model architecture...")
-    # Use meta device to skip weight initialization entirely (much faster)
-    with torch.device('meta'):
-        our_model = Llama(config, init_weights=False)
-
-    # Materialize on CPU first (HF weights load to CPU), then move to target device
-    our_model = our_model.to_empty(device='cpu').to(dtype)
-
-    # Re-initialize RoPE buffers (meta device doesn't compute them)
-    our_model.init_rope()
+    our_model = create_model(model_name_or_path, dtype=dtype)
 
     total_params: int = sum(p.numel() for p in our_model.parameters())
     logger.info(f"Total parameters: {total_params:,}, dtype: {dtype}")

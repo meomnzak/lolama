@@ -14,11 +14,11 @@ import sys
 
 import torch
 
-from src.model import Llama, LlamaConfig
+from lolama.model import Llama, LlamaConfig
 
 
 def main() -> None:
-    from src.utils import resolve_device
+    from lolama.utils import resolve_device
     device = resolve_device()
     print(f"Device: {device}")
     print()
@@ -28,7 +28,7 @@ def main() -> None:
         idx = sys.argv.index("--load")
         model_name = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "tinyllama"
         
-        from src.data import load_model
+        from lolama.data import load_model
         
         model_map = {
             "tinyllama": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",

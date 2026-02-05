@@ -352,11 +352,15 @@ def save_quantized_model(
     size_mb: float = weights_path.stat().st_size / 1e6
     logger.debug(f"Saved model.pt ({size_mb:.1f} MB)")
     
-    # Save quantization config
+    # Save quantization config -- derive skip_layers from unquantized Linear layers
+    skip_layers: list[str] = [
+        name for name, module in model.named_modules()
+        if isinstance(module, nn.Linear) and not isinstance(module, QuantizedLinear)
+    ]
     quant_config: dict = {
         'quantization_method': 'int8_weight_only',
         'bits': 8,
-        'skip_layers': ['lm_head', 'embed_tokens'],
+        'skip_layers': skip_layers,
     }
     quant_config_path: Path = output_path / "quantization_config.json"
     with open(quant_config_path, 'w') as f:

@@ -64,7 +64,7 @@ def _confirm_download(model_path: str) -> None:
 
 def _load_generator(args: argparse.Namespace):
     """Shared model/tokenizer setup for generate and chat commands."""
-    from .data import load_model, load_tokenizer, resolve_model_source
+    from .data import create_model, load_model, load_tokenizer, resolve_model_source
     from .model import (
         TextGenerator,
         quantize_model_int8,
@@ -94,7 +94,7 @@ def _load_generator(args: argparse.Namespace):
 
     if args.quantize and is_quantized_model_dir(str(quantized_dir)):
         logger.info(f"Found saved quantized model: {quantized_dir}/")
-        model = load_model(model_path, device="cpu")
+        model = create_model(model_path)
         logger.info("Applying int8 quantization structure...")
         quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"])
         logger.info("Loading quantized weights...")
@@ -234,16 +234,57 @@ def _get_version() -> str:
         return "unknown"
 
 
+def _print_help() -> None:
+    """Print friendly help message."""
+    from .data.registry import MODEL_REGISTRY
+
+    print()
+    print("lolama - LLaMA from scratch in PyTorch")
+    print()
+    print("Usage:")
+    print('  lolama generate "your prompt"    Generate text from a prompt')
+    print("  lolama chat                      Interactive chat session")
+    print("  lolama models                    List available models")
+    print()
+    print("Options:")
+    print("  -m, --model MODEL       Model alias or path (default: tinyllama)")
+    print("  --quantize              Use int8 quantization")
+    print("  --max-tokens N          Max tokens to generate (default: 256)")
+    print("  --temperature F         Sampling temperature (default: 0.7)")
+    print("  --top-p F               Top-p sampling (default: 0.9)")
+    print("  --no-stream             Disable streaming output")
+    print("  -v, --verbose           Show model loading details")
+    print("  -V, --version           Show version")
+    print()
+    print("Examples:")
+    print('  lolama generate "The meaning of life is"')
+    print('  lolama generate "Hello" -m open_llama_3b')
+    print("  lolama chat -m tinyllama --quantize")
+    print('  echo "Hello" | lolama generate')
+    print()
+    models = list(MODEL_REGISTRY.items())[:3]
+    print(f"Models: {', '.join(alias for alias, _ in models)}, ...")
+    print("Run 'lolama models' for full list.")
+    print()
+
+
 def main() -> None:
     """Main CLI entry point."""
+    # Handle 'lolama help' and 'lolama' with no args
+    if len(sys.argv) < 2 or sys.argv[1] == "help":
+        _print_help()
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(
         prog="lolama",
         description="LLaMA from scratch in PyTorch",
+        add_help=False,
     )
+    parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("-V", "--version", action="version", version=f"lolama {_get_version()}")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show model loading details")
     parser.add_argument("--debug", action="store_true", help="Show all debug output")
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    subparsers = parser.add_subparsers(dest="command")
 
     # Shared sampling options for generate and chat
     def add_model_args(p: argparse.ArgumentParser) -> None:
@@ -273,6 +314,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.help or args.command is None:
+        _print_help()
+        sys.exit(0)
+
     # Configure logging level
     import logging
     from .utils import set_verbosity
@@ -282,10 +327,6 @@ def main() -> None:
         set_verbosity(logging.INFO)
     else:
         set_verbosity(logging.WARNING)
-
-    if args.command is None:
-        parser.print_help()
-        sys.exit(0)
 
     args.func(args)
 

@@ -16,7 +16,6 @@ class LlamaConfig:
     num_layers: int = 8          # Transformer blocks
     hidden_dim: int = 1376       # FFN hidden (≈2.7 * d_model)
     max_seq_len: int = 2048      # Maximum sequence length
-    dropout: float = 0.0         # LLaMA doesn't use dropout
     eps: float = 1e-6            # RMSNorm epsilon
     tie_word_embeddings: bool = False  # Whether embed_tokens and lm_head share weights
     rope_base: int = 10000       # RoPE base frequency (10000 for LLaMA 1/2, 500000 for LLaMA 3)
