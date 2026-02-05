@@ -53,44 +53,55 @@ class TextGenerator:
         self,
         input_ids: torch.Tensor,
         config: GenerationConfig | None = None,
+        pixel_values: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Autoregressive text generation with pre-allocated KV cache.
-        
+
         Args:
             input_ids: Input token IDs (B, L)
             config: Generation configuration (preferred)
+            pixel_values: Optional (B, 3, H, W) image tensor for VLMs.
+                         Only used on first forward pass (cached internally after).
             **kwargs: Individual parameters (for backwards compatibility):
                 max_new_tokens, temperature, top_k, top_p, do_sample,
                 eos_token_id, repetition_penalty
-        
+
         Returns:
             torch.Tensor: Generated token IDs including prompt (B, L + generated)
-        
+
         Examples:
             # Using config (recommended)
             output = generator.generate(input_ids, GenerationConfig(temperature=0.7))
             output = generator.generate(input_ids, GenerationConfig.greedy())
-            
+
             # Using kwargs (backwards compatible)
             output = generator.generate(input_ids, max_new_tokens=100, temperature=0.7)
+
+            # With image for VLM
+            output = generator.generate(input_ids, pixel_values=pixel_values)
         """
         if config is None:
             config = GenerationConfig(**kwargs)
-        
+
         self.model.eval()
+
+        # Reset image cache if model supports it (for VLMs)
+        if hasattr(self.model, "reset_image_cache"):
+            self.model.reset_image_cache()
+
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]
-        
+
         # Track which sequences have finished (hit eos)
         finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-        
+
         # Create pre-allocated KV cache
         kv_caches: list[KVCache] = self.model.create_kv_caches(
             batch_size=batch_size,
             max_seq_len=prompt_len + config.max_new_tokens,
         )
-        
+
         # Create sampler
         sampler: Sampler = Sampler(
             temperature=config.temperature,
@@ -98,28 +109,33 @@ class TextGenerator:
             top_p=config.top_p,
             do_sample=config.do_sample,
         )
-        
-        logits: torch.Tensor = self.model(input_ids, kv_caches=kv_caches)
-        
+
+        # First forward pass - include pixel_values for VLMs
+        if pixel_values is not None:
+            logits: torch.Tensor = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
+        else:
+            logits: torch.Tensor = self.model(input_ids, kv_caches=kv_caches)
+
         for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
-            
+
             # Apply repetition penalty
             Sampler.apply_repetition_penalty(next_logits, input_ids, config.repetition_penalty)
-            
+
             # Sample next token
             next_token: torch.Tensor = sampler.sample(next_logits)
-            
+
             input_ids = torch.cat([input_ids, next_token], dim=1)
-            
+
             # Check for EOS token
             if config.eos_token_id is not None:
                 finished = finished | (next_token.squeeze(-1) == config.eos_token_id)
                 if finished.all():
                     break
-            
+
+            # Subsequent passes don't need pixel_values (cached in KV)
             logits = self.model(next_token, kv_caches=kv_caches)
-        
+
         return input_ids
     
     @torch.no_grad()
@@ -127,28 +143,36 @@ class TextGenerator:
         self,
         input_ids: torch.Tensor,
         config: GenerationConfig | None = None,
+        pixel_values: torch.Tensor | None = None,
         **kwargs,
     ) -> Iterator[int]:
         """Streaming text generation - yields tokens as they're generated.
-        
+
         Args:
             input_ids: Input token IDs (B, L) - must have batch_size=1
             config: Generation configuration (preferred)
+            pixel_values: Optional (B, 3, H, W) image tensor for VLMs.
+                         Only used on first forward pass (cached internally after).
             **kwargs: Individual parameters (for backwards compatibility)
-        
+
         Yields:
             int: Token ID for each generated token
         """
         if config is None:
             config = GenerationConfig(**kwargs)
-        
+
         self.model.eval()
+
+        # Reset image cache if model supports it (for VLMs)
+        if hasattr(self.model, "reset_image_cache"):
+            self.model.reset_image_cache()
+
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]
-        
+
         if batch_size != 1:
             raise ValueError("Streaming only supports batch_size=1")
-        
+
         # Create sampler
         sampler: Sampler = Sampler(
             temperature=config.temperature,
@@ -156,25 +180,28 @@ class TextGenerator:
             top_p=config.top_p,
             do_sample=config.do_sample,
         )
-        
+
         # Create pre-allocated KV cache
         kv_caches: list[KVCache] = self.model.create_kv_caches(
             batch_size=batch_size,
             max_seq_len=prompt_len + config.max_new_tokens,
         )
-        
-        # Initial forward pass (populates cache)
-        logits: torch.Tensor = self.model(input_ids, kv_caches=kv_caches)
-        
+
+        # Initial forward pass (populates cache) - include pixel_values for VLMs
+        if pixel_values is not None:
+            logits: torch.Tensor = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
+        else:
+            logits: torch.Tensor = self.model(input_ids, kv_caches=kv_caches)
+
         for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
-            
+
             # Apply repetition penalty
             Sampler.apply_repetition_penalty(next_logits, input_ids, config.repetition_penalty)
-            
+
             # Sample next token
             next_token: torch.Tensor = sampler.sample(next_logits)
-            
+
             token_id: int = next_token.item()
 
             # Check for EOS token before yielding
@@ -182,8 +209,9 @@ class TextGenerator:
                 break
 
             yield token_id
-            
+
             input_ids = torch.cat([input_ids, next_token], dim=1)
+            # Subsequent passes don't need pixel_values (cached in KV)
             logits = self.model(next_token, kv_caches=kv_caches)
     
     @torch.no_grad()

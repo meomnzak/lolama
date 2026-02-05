@@ -35,4 +35,23 @@ MODEL_REGISTRY: dict[str, dict[str, str | bool]] = {
         "params": "7B",
         "download_size": "13.5 GB",
     },
+    # Vision-Language Models (VLMs)
+    "llava-1.5-7b": {
+        "hf_name": "llava-hf/llava-1.5-7b-hf",
+        "folder": "llava-1.5-7b",
+        "trust_remote_code": False,
+        "model_type": "vlm",
+        "description": "LLaVA 1.5 7B — vision-language model for image understanding",
+        "params": "7B",
+        "download_size": "14 GB",
+    },
+    "llava-med": {
+        "hf_name": "microsoft/llava-med-v1.5-mistral-7b",
+        "folder": "llava-med-7b",
+        "trust_remote_code": True,  # Uses custom llava_mistral architecture
+        "model_type": "vlm",
+        "description": "LLaVA-Med 7B — medical/radiology vision-language model",
+        "params": "7B",
+        "download_size": "14 GB",
+    },
 }

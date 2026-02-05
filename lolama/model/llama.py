@@ -104,29 +104,40 @@ class Llama(nn.Module):
     
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         kv_caches: list[KVCache] | None = None,
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
-            input_ids: (B, L) input token IDs
+            input_ids: (B, L) input token IDs. Mutually exclusive with inputs_embeds.
+            inputs_embeds: (B, L, D) input embeddings (for VLM merged embeddings).
+                          Mutually exclusive with input_ids.
             kv_caches: Optional List[KVCache] for generation (updated in-place)
             attention_mask: Optional (B, L) mask with 1=real token, 0=padding
-        
+
         Returns:
             logits: (B, L, vocab_size)
         """
-        x: torch.Tensor = self.embed_tokens(input_ids)
-        
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("Cannot specify both input_ids and inputs_embeds")
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("Must specify either input_ids or inputs_embeds")
+
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        else:
+            x = self.embed_tokens(input_ids)
+
         # Transformer layers (KV caches updated in-place)
         for i, layer in enumerate(self.layers):
             layer_cache: KVCache | None = kv_caches[i] if kv_caches is not None else None
             x = layer(x, self.cos, self.sin, kv_cache=layer_cache, attention_mask=attention_mask)
-        
+
         x = self.norm(x)
         logits: torch.Tensor = self.lm_head(x)
-        
+
         return logits
     
     def count_parameters(self) -> dict[str, int]:

@@ -18,12 +18,20 @@ from .quantize import (
     is_quantized_model_dir,
 )
 
+# VLM components
+from .vlm_config import VisionConfig, VLMConfig
+from .llava import LLaVA
+
 __all__ = [
     # Config
     'LlamaConfig',
     'GenerationConfig',
+    # VLM Config
+    'VisionConfig',
+    'VLMConfig',
     # Model
     'Llama',
+    'LLaVA',
     # Generation
     'GenerativeModel',
     'TextGenerator',
