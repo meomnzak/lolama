@@ -86,9 +86,7 @@ class TextGenerator:
 
         self.model.eval()
 
-        # Reset image cache if model supports it (for VLMs)
-        if hasattr(self.model, "reset_image_cache"):
-            self.model.reset_image_cache()
+        self.model.reset_image_cache()
 
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]
@@ -171,9 +169,7 @@ class TextGenerator:
 
         self.model.eval()
 
-        # Reset image cache if model supports it (for VLMs)
-        if hasattr(self.model, "reset_image_cache"):
-            self.model.reset_image_cache()
+        self.model.reset_image_cache()
 
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]

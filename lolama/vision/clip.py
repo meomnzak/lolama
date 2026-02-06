@@ -243,7 +243,7 @@ class CLIPVisionTransformer(nn.Module):
 
         self.embeddings = CLIPVisionEmbeddings(config)
         self.encoder = CLIPEncoder(config)
-        self.pre_layrnorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.pre_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.post_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
@@ -265,7 +265,7 @@ class CLIPVisionTransformer(nn.Module):
         hidden_states = self.embeddings(pixel_values)
 
         # Pre-encoder layer norm (some CLIP variants have this)
-        hidden_states = self.pre_layrnorm(hidden_states)
+        hidden_states = self.pre_layernorm(hidden_states)
 
         # Transformer encoder
         last_hidden_state, all_hidden_states = self.encoder(

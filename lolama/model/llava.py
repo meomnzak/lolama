@@ -94,6 +94,11 @@ class LLaVA(nn.Module):
     ) -> torch.Tensor:
         """Replace <image> tokens with image features.
 
+        Vectorized: no Python loops over the batch dimension. Uses batched
+        gather + torch.where to assemble the output in one pass.
+
+        Assumes exactly one <image> token per sample (single-image).
+
         Args:
             input_ids: (batch, seq_len) token IDs with <image> placeholders
             image_features: (batch, num_image_tokens, hidden_size) encoded images
@@ -102,61 +107,48 @@ class LLaVA(nn.Module):
             (batch, new_seq_len, hidden_size) merged embeddings
         """
         batch_size, seq_len = input_ids.shape
-        num_image_tokens = image_features.shape[1]
+        num_img = image_features.shape[1]
+        hidden = image_features.shape[2]
         image_token_id = self._vlm_config.image_token_id
+        device = input_ids.device
 
-        # Get text embeddings
         text_embeds = self.language_model.embed_tokens(input_ids)
 
-        # Find image token positions
-        image_token_mask = input_ids == image_token_id
+        new_seq_len = seq_len - 1 + num_img
 
-        # Count image tokens per sample (should be 1 per image)
-        num_image_tokens_per_sample = image_token_mask.sum(dim=1)
+        # (batch,) — position of the <image> token in each sample
+        image_pos = (input_ids == image_token_id).long().argmax(dim=1)  # (B,)
 
-        # For now, assume single image per sample
-        # More complex handling would be needed for multi-image
+        # Output position indices: (1, new_seq_len)
+        j = torch.arange(new_seq_len, device=device).unsqueeze(0)
+        img_pos = image_pos.unsqueeze(1)  # (B, 1)
 
-        # Build output embeddings
-        # New sequence length: original - 1 (image token) + num_image_tokens
-        new_seq_len = seq_len - 1 + num_image_tokens
+        # Boolean masks: which output positions come from text vs image
+        before_mask = j < img_pos                          # text before <image>
+        image_mask = (j >= img_pos) & (j < img_pos + num_img)  # image features
+        after_mask = j >= img_pos + num_img                # text after <image>
 
-        merged_embeds = torch.zeros(
-            batch_size,
-            new_seq_len,
-            text_embeds.shape[-1],
-            dtype=text_embeds.dtype,
-            device=text_embeds.device,
+        # Source indices into text_embeds (skip the <image> token itself)
+        #   before: output pos j → text pos j
+        #   after:  output pos j → text pos j - num_img + 1
+        text_src = torch.where(before_mask, j, j - num_img + 1)
+        text_src = text_src.clamp(0, seq_len - 1)
+
+        # Source indices into image_features
+        img_src = (j - img_pos).clamp(0, num_img - 1)
+
+        # Gather from both sources (expand index to hidden dim)
+        text_gathered = torch.gather(
+            text_embeds, 1, text_src.unsqueeze(-1).expand(-1, -1, hidden)
+        )
+        img_gathered = torch.gather(
+            image_features, 1, img_src.unsqueeze(-1).expand(-1, -1, hidden)
         )
 
-        for i in range(batch_size):
-            # Find position of <image> token
-            image_positions = (input_ids[i] == image_token_id).nonzero(as_tuple=True)[0]
+        # Assemble: image positions get image features, everything else gets text
+        merged = torch.where(image_mask.unsqueeze(-1), img_gathered, text_gathered)
 
-            if len(image_positions) == 0:
-                # No image token - just use text embeddings
-                merged_embeds[i, :seq_len] = text_embeds[i]
-                continue
-
-            image_pos = image_positions[0].item()
-
-            # Copy text before image
-            if image_pos > 0:
-                merged_embeds[i, :image_pos] = text_embeds[i, :image_pos]
-
-            # Insert image features
-            merged_embeds[i, image_pos : image_pos + num_image_tokens] = image_features[i]
-
-            # Copy text after image
-            text_after_pos = image_pos + 1
-            merged_pos = image_pos + num_image_tokens
-            remaining_text_len = seq_len - text_after_pos
-            if remaining_text_len > 0:
-                merged_embeds[i, merged_pos : merged_pos + remaining_text_len] = (
-                    text_embeds[i, text_after_pos:]
-                )
-
-        return merged_embeds
+        return merged
 
     def create_kv_caches(
         self,

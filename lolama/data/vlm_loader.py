@@ -120,8 +120,9 @@ def _build_safetensors_mapping(config: VLMConfig) -> dict[str, str]:
     mapping["vision_tower.vision_model.embeddings.position_embedding.weight"] = (
         "vision_tower.embeddings.position_embedding.weight"
     )
-    mapping["vision_tower.vision_model.pre_layrnorm.weight"] = "vision_tower.pre_layrnorm.weight"
-    mapping["vision_tower.vision_model.pre_layrnorm.bias"] = "vision_tower.pre_layrnorm.bias"
+    # Note: HF key has a typo ("layrnorm") inherited from OpenAI CLIP — our key is fixed
+    mapping["vision_tower.vision_model.pre_layrnorm.weight"] = "vision_tower.pre_layernorm.weight"
+    mapping["vision_tower.vision_model.pre_layrnorm.bias"] = "vision_tower.pre_layernorm.bias"
 
     for i in range(config.vision_config.num_hidden_layers):
         sf = f"vision_tower.vision_model.encoder.layers.{i}"
@@ -193,12 +194,12 @@ def build_llava_weight_mapping(config: VLMConfig) -> dict[str, str]:
         "vision_tower.embeddings.position_embedding.weight"
     )
 
-    # Pre-layernorm
+    # Pre-layernorm (HF key has typo "layrnorm" inherited from OpenAI CLIP)
     mapping["model.vision_tower.vision_model.pre_layrnorm.weight"] = (
-        "vision_tower.pre_layrnorm.weight"
+        "vision_tower.pre_layernorm.weight"
     )
     mapping["model.vision_tower.vision_model.pre_layrnorm.bias"] = (
-        "vision_tower.pre_layrnorm.bias"
+        "vision_tower.pre_layernorm.bias"
     )
 
     # Vision encoder layers

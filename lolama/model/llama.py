@@ -102,9 +102,14 @@ class Llama(nn.Module):
             for _ in range(self.config.num_layers)
         ]
     
+    def reset_image_cache(self) -> None:
+        """No-op for text-only models. Satisfies GenerativeModel protocol."""
+        pass
+
     def forward(
         self,
         input_ids: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
         kv_caches: list[KVCache] | None = None,
         attention_mask: torch.Tensor | None = None,
