@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import json
 from pathlib import Path
 
 import torch
@@ -99,8 +101,75 @@ def create_vlm_config_from_hf(
     return vlm_config
 
 
+def _build_safetensors_mapping(config: VLMConfig) -> dict[str, str]:
+    """Build weight mapping from safetensors on-disk keys to our model keys.
+
+    Safetensors keys differ from HF state_dict keys (no top-level 'model.' prefix,
+    and language model keys use 'language_model.model.' for the inner MistralModel).
+    """
+    mapping: dict[str, str] = {}
+
+    # --- Vision tower ---
+    # Safetensors: vision_tower.vision_model.* -> Ours: vision_tower.*
+    mapping["vision_tower.vision_model.embeddings.patch_embedding.weight"] = (
+        "vision_tower.embeddings.patch_embedding.weight"
+    )
+    mapping["vision_tower.vision_model.embeddings.class_embedding"] = (
+        "vision_tower.embeddings.class_embedding"
+    )
+    mapping["vision_tower.vision_model.embeddings.position_embedding.weight"] = (
+        "vision_tower.embeddings.position_embedding.weight"
+    )
+    mapping["vision_tower.vision_model.pre_layrnorm.weight"] = "vision_tower.pre_layrnorm.weight"
+    mapping["vision_tower.vision_model.pre_layrnorm.bias"] = "vision_tower.pre_layrnorm.bias"
+
+    for i in range(config.vision_config.num_hidden_layers):
+        sf = f"vision_tower.vision_model.encoder.layers.{i}"
+        our = f"vision_tower.encoder.layers.{i}"
+        for proj in ("q_proj", "k_proj", "v_proj", "out_proj"):
+            mapping[f"{sf}.self_attn.{proj}.weight"] = f"{our}.self_attn.{proj}.weight"
+            mapping[f"{sf}.self_attn.{proj}.bias"] = f"{our}.self_attn.{proj}.bias"
+        for ln in ("layer_norm1", "layer_norm2"):
+            mapping[f"{sf}.{ln}.weight"] = f"{our}.{ln}.weight"
+            mapping[f"{sf}.{ln}.bias"] = f"{our}.{ln}.bias"
+        mapping[f"{sf}.mlp.fc1.weight"] = f"{our}.mlp.fc1.weight"
+        mapping[f"{sf}.mlp.fc1.bias"] = f"{our}.mlp.fc1.bias"
+        mapping[f"{sf}.mlp.fc2.weight"] = f"{our}.mlp.fc2.weight"
+        mapping[f"{sf}.mlp.fc2.bias"] = f"{our}.mlp.fc2.bias"
+
+    mapping["vision_tower.vision_model.post_layernorm.weight"] = "vision_tower.post_layernorm.weight"
+    mapping["vision_tower.vision_model.post_layernorm.bias"] = "vision_tower.post_layernorm.bias"
+
+    # --- Projector (keys are the same) ---
+    for n in ("linear_1", "linear_2"):
+        mapping[f"multi_modal_projector.{n}.weight"] = f"multi_modal_projector.{n}.weight"
+        mapping[f"multi_modal_projector.{n}.bias"] = f"multi_modal_projector.{n}.bias"
+
+    # --- Language model ---
+    # Safetensors: language_model.model.* -> Ours: language_model.*
+    mapping["language_model.model.embed_tokens.weight"] = "language_model.embed_tokens.weight"
+
+    for i in range(config.llm_config.num_layers):
+        sf = f"language_model.model.layers.{i}"
+        our = f"language_model.layers.{i}"
+        mapping[f"{sf}.self_attn.q_proj.weight"] = f"{our}.attention.q_proj.weight"
+        mapping[f"{sf}.self_attn.k_proj.weight"] = f"{our}.attention.k_proj.weight"
+        mapping[f"{sf}.self_attn.v_proj.weight"] = f"{our}.attention.v_proj.weight"
+        mapping[f"{sf}.self_attn.o_proj.weight"] = f"{our}.attention.o_proj.weight"
+        mapping[f"{sf}.mlp.gate_proj.weight"] = f"{our}.feed_forward.w_gate.weight"
+        mapping[f"{sf}.mlp.up_proj.weight"] = f"{our}.feed_forward.w_up.weight"
+        mapping[f"{sf}.mlp.down_proj.weight"] = f"{our}.feed_forward.w_down.weight"
+        mapping[f"{sf}.input_layernorm.weight"] = f"{our}.attention_norm.weight"
+        mapping[f"{sf}.post_attention_layernorm.weight"] = f"{our}.ffn_norm.weight"
+
+    mapping["language_model.model.norm.weight"] = "language_model.norm.weight"
+    mapping["language_model.lm_head.weight"] = "language_model.lm_head.weight"
+
+    return mapping
+
+
 def build_llava_weight_mapping(config: VLMConfig) -> dict[str, str]:
-    """Build weight mapping from HuggingFace LLaVA to our model.
+    """Build weight mapping from HuggingFace LLaVA state_dict to our model.
 
     Args:
         config: VLM configuration
@@ -114,28 +183,28 @@ def build_llava_weight_mapping(config: VLMConfig) -> dict[str, str]:
     # HF: model.vision_tower.vision_model.* -> Ours: vision_tower.*
 
     # Embeddings
-    mapping["vision_tower.vision_model.embeddings.patch_embedding.weight"] = (
+    mapping["model.vision_tower.vision_model.embeddings.patch_embedding.weight"] = (
         "vision_tower.embeddings.patch_embedding.weight"
     )
-    mapping["vision_tower.vision_model.embeddings.class_embedding"] = (
+    mapping["model.vision_tower.vision_model.embeddings.class_embedding"] = (
         "vision_tower.embeddings.class_embedding"
     )
-    mapping["vision_tower.vision_model.embeddings.position_embedding.weight"] = (
+    mapping["model.vision_tower.vision_model.embeddings.position_embedding.weight"] = (
         "vision_tower.embeddings.position_embedding.weight"
     )
 
     # Pre-layernorm
-    mapping["vision_tower.vision_model.pre_layrnorm.weight"] = (
+    mapping["model.vision_tower.vision_model.pre_layrnorm.weight"] = (
         "vision_tower.pre_layrnorm.weight"
     )
-    mapping["vision_tower.vision_model.pre_layrnorm.bias"] = (
+    mapping["model.vision_tower.vision_model.pre_layrnorm.bias"] = (
         "vision_tower.pre_layrnorm.bias"
     )
 
     # Vision encoder layers
     num_vision_layers = config.vision_config.num_hidden_layers
     for i in range(num_vision_layers):
-        hf_prefix = f"vision_tower.vision_model.encoder.layers.{i}"
+        hf_prefix = f"model.vision_tower.vision_model.encoder.layers.{i}"
         our_prefix = f"vision_tower.encoder.layers.{i}"
 
         # Self-attention
@@ -161,26 +230,26 @@ def build_llava_weight_mapping(config: VLMConfig) -> dict[str, str]:
         mapping[f"{hf_prefix}.mlp.fc2.bias"] = f"{our_prefix}.mlp.fc2.bias"
 
     # Post-layernorm
-    mapping["vision_tower.vision_model.post_layernorm.weight"] = (
+    mapping["model.vision_tower.vision_model.post_layernorm.weight"] = (
         "vision_tower.post_layernorm.weight"
     )
-    mapping["vision_tower.vision_model.post_layernorm.bias"] = (
+    mapping["model.vision_tower.vision_model.post_layernorm.bias"] = (
         "vision_tower.post_layernorm.bias"
     )
 
     # Multi-modal projector mappings
-    mapping["multi_modal_projector.linear_1.weight"] = "multi_modal_projector.linear_1.weight"
-    mapping["multi_modal_projector.linear_1.bias"] = "multi_modal_projector.linear_1.bias"
-    mapping["multi_modal_projector.linear_2.weight"] = "multi_modal_projector.linear_2.weight"
-    mapping["multi_modal_projector.linear_2.bias"] = "multi_modal_projector.linear_2.bias"
+    mapping["model.multi_modal_projector.linear_1.weight"] = "multi_modal_projector.linear_1.weight"
+    mapping["model.multi_modal_projector.linear_1.bias"] = "multi_modal_projector.linear_1.bias"
+    mapping["model.multi_modal_projector.linear_2.weight"] = "multi_modal_projector.linear_2.weight"
+    mapping["model.multi_modal_projector.linear_2.bias"] = "multi_modal_projector.linear_2.bias"
 
     # Language model mappings
-    # HF: language_model.model.* -> Ours: language_model.*
-    mapping["language_model.model.embed_tokens.weight"] = "language_model.embed_tokens.weight"
+    # HF: model.language_model.* -> Ours: language_model.*
+    mapping["model.language_model.embed_tokens.weight"] = "language_model.embed_tokens.weight"
 
     num_llm_layers = config.llm_config.num_layers
     for i in range(num_llm_layers):
-        hf_prefix = f"language_model.model.layers.{i}"
+        hf_prefix = f"model.language_model.layers.{i}"
         our_prefix = f"language_model.layers.{i}"
 
         # Attention
@@ -199,10 +268,79 @@ def build_llava_weight_mapping(config: VLMConfig) -> dict[str, str]:
         mapping[f"{hf_prefix}.post_attention_layernorm.weight"] = f"{our_prefix}.ffn_norm.weight"
 
     # Final norm and LM head
-    mapping["language_model.model.norm.weight"] = "language_model.norm.weight"
-    mapping["language_model.lm_head.weight"] = "language_model.lm_head.weight"
+    mapping["model.language_model.norm.weight"] = "language_model.norm.weight"
+    mapping["lm_head.weight"] = "language_model.lm_head.weight"
 
     return mapping
+
+
+def _load_weights_from_safetensors(
+    our_model: LLaVA,
+    model_dir: Path,
+    strict_threshold: float = 0.90,
+    skip_llm_weights: bool = False,
+) -> LLaVA:
+    """Load weights directly from safetensors files — no HF model copy needed.
+
+    This loads one tensor at a time from disk, keeping peak memory at
+    ~1x model size instead of ~2x with the HF from_pretrained approach.
+    """
+    from safetensors import safe_open
+
+    index_path = model_dir / "model.safetensors.index.json"
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map: dict[str, str] = index["weight_map"]
+
+    mapping = _build_safetensors_mapping(our_model._vlm_config)
+
+    # Filter out language model weights if requested
+    if skip_llm_weights:
+        mapping = {k: v for k, v in mapping.items() if not v.startswith("language_model.")}
+        logger.info(f"Skipping LLM weights, loading {len(mapping)} vision/projector weights")
+
+    our_state = our_model.state_dict()
+
+    matched = 0
+    total = len(mapping)
+    missing: list[str] = []
+
+    # Group by file so we open each safetensors file only once
+    file_to_keys: dict[str, list[tuple[str, str]]] = {}
+    for sf_key, our_key in mapping.items():
+        if sf_key not in weight_map:
+            missing.append(sf_key)
+            continue
+        fname = weight_map[sf_key]
+        file_to_keys.setdefault(fname, []).append((sf_key, our_key))
+
+    for fname, keys in file_to_keys.items():
+        filepath = model_dir / fname
+        # Resolve symlinks for safetensors files
+        filepath = filepath.resolve()
+        with safe_open(str(filepath), framework="pt", device="cpu") as f:
+            for sf_key, our_key in keys:
+                tensor = f.get_tensor(sf_key)
+                if our_key in our_state and tensor.shape == our_state[our_key].shape:
+                    our_state[our_key].copy_(tensor.to(our_state[our_key].dtype))
+                    matched += 1
+
+    match_rate = matched / total if total > 0 else 0.0
+    logger.info(f"Successfully loaded {matched}/{total} weights ({match_rate:.1%})")
+
+    if missing:
+        logger.warning(f"{len(missing)} keys missing in safetensors: {missing[:5]}")
+
+    if match_rate < strict_threshold:
+        raise WeightLoadingError(
+            f"Weight loading failed: {match_rate:.1%} matched, "
+            f"but {strict_threshold:.0%} required."
+        )
+
+    if matched == total:
+        logger.info("All LLaVA weights loaded successfully!")
+
+    return our_model
 
 
 def load_llava_weights(
@@ -211,25 +349,24 @@ def load_llava_weights(
     trust_remote_code: bool = False,
     local_files_only: bool = False,
     strict_threshold: float = 0.90,
+    skip_llm_weights: bool = False,
 ) -> LLaVA:
     """Load weights from HuggingFace LLaVA model into our model.
 
-    Args:
-        our_model: Target LLaVA model
-        hf_model_path: Path or HF model name
-        trust_remote_code: Whether to trust remote code
-        local_files_only: Only use local files
-        strict_threshold: Minimum fraction of weights that must load successfully
-
-    Returns:
-        Model with loaded weights
-
-    Raises:
-        WeightLoadingError: If match rate falls below strict_threshold
+    Prefers direct safetensors loading (memory-efficient) when available,
+    falls back to loading the full HF model otherwise.
     """
     logger.info(f"Loading LLaVA weights from {hf_model_path}...")
 
-    # Load HF model
+    # Fast path: load directly from safetensors (avoids 2x memory)
+    model_dir = Path(hf_model_path)
+    index_path = model_dir / "model.safetensors.index.json"
+    if model_dir.is_dir() and index_path.exists():
+        return _load_weights_from_safetensors(
+            our_model, model_dir, strict_threshold, skip_llm_weights=skip_llm_weights,
+        )
+
+    # Fallback: load full HF model (2x memory but works for any source)
     hf_model = LlavaForConditionalGeneration.from_pretrained(
         hf_model_path,
         torch_dtype=torch.float16,
@@ -284,6 +421,10 @@ def load_llava_weights(
 
     # Load weights
     missing_after_load, unexpected = our_model.load_state_dict(new_state_dict, strict=False)
+
+    # Free HF model immediately
+    del hf_model, hf_state, new_state_dict
+    gc.collect()
 
     # Report results
     logger.info(f"Successfully loaded {matched}/{total_expected} weights ({match_rate:.1%})")
@@ -362,6 +503,7 @@ def load_llava_model(
     model_name_or_path: str,
     device: str | None = None,
     dtype: torch.dtype = torch.float16,
+    skip_llm_weights: bool = False,
 ) -> LLaVA:
     """Load a pretrained LLaVA model.
 
@@ -372,6 +514,8 @@ def load_llava_model(
         model_name_or_path: HuggingFace model name, registry alias, or local path
         device: Device to load on (default: auto-detect)
         dtype: Model dtype (default: float16)
+        skip_llm_weights: If True, skip loading language model weights
+            (useful when int8 LLM weights will be loaded separately)
 
     Returns:
         LLaVA model with loaded weights
@@ -409,8 +553,20 @@ def load_llava_model(
     with torch.device("meta"):
         model = LLaVA(config, init_weights=False)
 
-    model = model.to_empty(device="cpu").to(dtype)
-    model.init_rope()
+    if skip_llm_weights:
+        # Only materialize vision tower + projector on CPU.
+        # The language model stays on meta device — its weights will be
+        # loaded from the quantized checkpoint (via apply_quantization_structure
+        # + load_quantized_model in the CLI).
+        model.vision_tower = model.vision_tower.to_empty(device="cpu").to(dtype)
+        model.multi_modal_projector = model.multi_modal_projector.to_empty(device="cpu").to(dtype)
+    else:
+        model = model.to_empty(device="cpu").to(dtype)
+        model.init_rope()
+
+    # Reinitialize CLIP position_ids (non-persistent buffer lost during meta device creation)
+    num_positions = config.vision_config.num_positions
+    model.vision_tower.embeddings.position_ids = torch.arange(num_positions).unsqueeze(0)
 
     # Load weights
     model = load_llava_weights(
@@ -418,12 +574,16 @@ def load_llava_model(
         model_path,
         trust_remote_code=trust_remote_code,
         local_files_only=True,
+        skip_llm_weights=skip_llm_weights,
     )
 
     # Move to target device
     if device != "cpu":
         logger.info(f"Moving model to {device}...")
         model = model.to(device)
+
+    # Reclaim any leftover memory from loading
+    gc.collect()
 
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"LLaVA model ready! Total parameters: {total_params:,}")

@@ -46,11 +46,11 @@ MODEL_REGISTRY: dict[str, dict[str, str | bool]] = {
         "download_size": "14 GB",
     },
     "llava-med": {
-        "hf_name": "microsoft/llava-med-v1.5-mistral-7b",
+        "hf_name": "chaoyinshe/llava-med-v1.5-mistral-7b-hf",
         "folder": "llava-med-7b",
-        "trust_remote_code": True,  # Uses custom llava_mistral architecture
+        "trust_remote_code": False,
         "model_type": "vlm",
-        "description": "LLaVA-Med 7B — medical/radiology vision-language model",
+        "description": "LLaVA-Med 7B — medical/radiology vision-language model (HF-compatible)",
         "params": "7B",
         "download_size": "14 GB",
     },

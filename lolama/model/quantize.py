@@ -211,6 +211,42 @@ class QuantizedLinear(nn.Module):
         return f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, quantized=int8'
 
 
+def apply_quantization_structure(model: nn.Module, skip_layers: list[str] | None = None) -> nn.Module:
+    """Replace Linear layers with empty QuantizedLinear (no quantization math).
+
+    Use this when loading saved int8 weights: creates the right module
+    structure so load_quantized_model() can fill in the weights.
+
+    Args:
+        model: The model to modify (in-place)
+        skip_layers: List of layer name patterns to skip (e.g., ['lm_head'])
+
+    Returns:
+        The model with QuantizedLinear placeholders
+    """
+    skip_layers = skip_layers or []
+
+    def should_skip(name: str) -> bool:
+        return any(skip in name for skip in skip_layers)
+
+    count = 0
+    for name, module in list(model.named_modules()):
+        if isinstance(module, nn.Linear) and not should_skip(name):
+            parts = name.split('.')
+            parent = model
+            for part in parts[:-1]:
+                parent = getattr(parent, part)
+            qlayer = QuantizedLinear(
+                module.in_features, module.out_features,
+                bias=module.bias is not None, dtype=module.weight.dtype,
+            )
+            setattr(parent, parts[-1], qlayer)
+            count += 1
+
+    logger.info(f"Applied int8 structure to {count} layers (awaiting weight load)")
+    return model
+
+
 def quantize_model_int8(model: nn.Module, skip_layers: list[str] | None = None) -> nn.Module:
     """Quantize all Linear layers in a model to int8.
     
@@ -302,12 +338,12 @@ def save_quantized_model(
     source_dir: str | None = None,
 ) -> None:
     """Save a quantized model to a directory.
-    
+
     Creates a standalone quantized model directory with:
-    - model.pt: Quantized weights
+    - model.safetensors: Quantized weights (mmap-friendly format)
     - quantization_config.json: Quantization metadata
     - Copied files from source: tokenizer, config, etc.
-    
+
     Args:
         model: The quantized model
         output_dir: Directory to save to (e.g., 'weights/tinyllama-1.1b-int8')
@@ -316,16 +352,17 @@ def save_quantized_model(
     import json
     import shutil
     from pathlib import Path
-    
+    from safetensors.torch import save_file
+
     output_path: Path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Copy tokenizer and config files from source
     if source_dir is not None:
         source_path: Path = Path(source_dir)
         files_to_copy: list[str] = [
             'tokenizer.json',
-            'tokenizer_config.json', 
+            'tokenizer_config.json',
             'special_tokens_map.json',
             'chat_template.jinja',
             'generation_config.json',
@@ -336,22 +373,14 @@ def save_quantized_model(
             if src_file.exists():
                 shutil.copy2(src_file, output_path / filename)
                 logger.debug(f"Copied {filename}")
-    
-    # Save quantized weights
-    weights_path: Path = output_path / "model.pt"
-    torch.save({
-        'state_dict': model.state_dict(),
-        'config': model.config.__dict__ if hasattr(model, 'config') else None,
-        'quantized': True,
-        'quantization': {
-            'method': 'int8_weight_only',
-            'bits': 8,
-        },
-    }, weights_path)
-    
+
+    # Save quantized weights as safetensors (mmap-friendly, ~4x faster to load)
+    weights_path: Path = output_path / "model.safetensors"
+    save_file(model.state_dict(), str(weights_path))
+
     size_mb: float = weights_path.stat().st_size / 1e6
-    logger.debug(f"Saved model.pt ({size_mb:.1f} MB)")
-    
+    logger.debug(f"Saved model.safetensors ({size_mb:.1f} MB)")
+
     # Save quantization config -- derive skip_layers from unquantized Linear layers
     skip_layers: list[str] = [
         name for name, module in model.named_modules()
@@ -360,56 +389,71 @@ def save_quantized_model(
     quant_config: dict = {
         'quantization_method': 'int8_weight_only',
         'bits': 8,
+        'quantized': True,
         'skip_layers': skip_layers,
     }
     quant_config_path: Path = output_path / "quantization_config.json"
     with open(quant_config_path, 'w') as f:
         json.dump(quant_config, f, indent=2)
-    
+
     logger.info(f"Saved quantized model to {output_dir}/")
 
 
 def load_quantized_model(
     model_dir: str,
     model: nn.Module,
+    device: str = "cpu",
 ) -> nn.Module:
     """Load quantized weights from a directory into a model.
-    
+
+    Supports safetensors (fast, mmap) with fallback to legacy .pt format.
+    When device != "cpu", loads tensors directly to the target device and
+    uses assign=True to avoid redundant CPU allocation.
+
     Note: The model architecture must already have QuantizedLinear layers.
-    Call quantize_model_int8() first to convert the architecture, then load weights.
-    
+    Call apply_quantization_structure() first to set up the module tree.
+
     Args:
         model_dir: Path to the quantized model directory
-        model: Model with QuantizedLinear layers (call quantize_model_int8 first)
-    
+        model: Model with QuantizedLinear layers
+        device: Target device to load weights onto (default: "cpu")
+
     Returns:
         Model with loaded quantized weights
     """
     from pathlib import Path
-    
+
     model_path: Path = Path(model_dir)
-    weights_path: Path = model_path / "model.pt"
-    
-    if not weights_path.exists():
-        raise ValueError(f"No model.pt found in {model_dir}")
-    
-    checkpoint: dict = torch.load(weights_path, map_location='cpu', weights_only=False)
-    
-    if not checkpoint.get('quantized', False):
-        raise ValueError(f"{weights_path} is not a quantized model checkpoint")
-    
-    model.load_state_dict(checkpoint['state_dict'])
-    logger.info(f"Loaded quantized model from {model_dir}/")
-    
+    safetensors_path: Path = model_path / "model.safetensors"
+    legacy_path: Path = model_path / "model.pt"
+
+    if safetensors_path.exists():
+        from safetensors.torch import load_file
+
+        state_dict: dict = load_file(str(safetensors_path), device=device)
+        model.load_state_dict(state_dict, assign=True)
+        logger.info(f"Loaded quantized model from {model_dir}/")
+    elif legacy_path.exists():
+        checkpoint: dict = torch.load(legacy_path, map_location=device, weights_only=False)
+        if not checkpoint.get('quantized', False):
+            raise ValueError(f"{legacy_path} is not a quantized model checkpoint")
+        model.load_state_dict(checkpoint['state_dict'], assign=True)
+        logger.info(f"Loaded quantized model from {model_dir}/ (legacy .pt)")
+    else:
+        raise ValueError(f"No model.safetensors or model.pt found in {model_dir}")
+
     return model
 
 
 def is_quantized_model_dir(path: str) -> bool:
     """Check if a path is a quantized model directory."""
     from pathlib import Path
-    
+
     model_path: Path = Path(path)
-    weights_file: Path = model_path / "model.pt"
     quant_config: Path = model_path / "quantization_config.json"
-    
-    return weights_file.exists() and quant_config.exists()
+    has_weights: bool = (
+        (model_path / "model.safetensors").exists()
+        or (model_path / "model.pt").exists()
+    )
+
+    return has_weights and quant_config.exists()

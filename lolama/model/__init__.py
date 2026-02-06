@@ -10,6 +10,7 @@ from .llama import Llama
 from .sampler import Sampler
 from .quantize import (
     QuantizedLinear,
+    apply_quantization_structure,
     quantize_model_int8,
     dequantize_model_for_inference,
     get_model_size_mb,
@@ -46,6 +47,7 @@ __all__ = [
     'repeat_kv',
     # Quantization
     'QuantizedLinear',
+    'apply_quantization_structure',
     'quantize_model_int8',
     'dequantize_model_for_inference',
     'get_model_size_mb',

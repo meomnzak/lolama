@@ -80,6 +80,7 @@ def _load_generator(args: argparse.Namespace):
     from .data import create_model, load_model, load_tokenizer, resolve_model_source
     from .model import (
         TextGenerator,
+        apply_quantization_structure,
         quantize_model_int8,
         get_model_size_mb,
         save_quantized_model,
@@ -108,7 +109,46 @@ def _load_generator(args: argparse.Namespace):
         from .vision import CLIPImageProcessor
 
         logger.info("Loading VLM model...")
-        model = load_llava_model(model_path, device=device)
+
+        if args.quantize:
+            # Check for saved quantized LLM weights
+            p = Path(model_path)
+            vlm_name = p.name if p.exists() else model_path.replace("/", "_").replace("\\", "_")
+            vlm_quantized_dir = weights_dir / f"{vlm_name}-vlm-int8"
+
+            if is_quantized_model_dir(str(vlm_quantized_dir)):
+                # Fast path: load only vision/projector weights (LLM stays on meta),
+                # apply quantization structure, load int8 weights direct to device
+                logger.info(f"Found saved quantized VLM: {vlm_quantized_dir}/")
+                model = load_llava_model(model_path, device="cpu", skip_llm_weights=True)
+                apply_quantization_structure(model.language_model, skip_layers=["lm_head", "embed_tokens"])
+                logger.info("Loading saved int8 weights...")
+                load_quantized_model(str(vlm_quantized_dir), model.language_model, device=device)
+                logger.info(f"Moving vision model to {device}...")
+                model.vision_tower.to(device)
+                model.multi_modal_projector.to(device)
+                logger.info(f"Model size: {get_model_size_mb(model):.1f} MB")
+            else:
+                # First time: load on CPU, quantize, save, move to device
+                model = load_llava_model(model_path, device="cpu")
+                size_before = get_model_size_mb(model)
+                logger.info(f"Quantizing VLM language model (before: {size_before:.1f} MB)...")
+                quantize_model_int8(
+                    model.language_model,
+                    skip_layers=["lm_head", "embed_tokens"],
+                )
+                source = resolve_model_source(model_path)
+                source_dir = source["local_path"]
+                logger.info(f"Saving quantized LLM to {vlm_quantized_dir}/")
+                save_quantized_model(
+                    model.language_model, str(vlm_quantized_dir),
+                    str(source_dir) if source_dir else None,
+                )
+                logger.info(f"Model size after quantization: {get_model_size_mb(model):.1f} MB")
+                logger.info(f"Moving quantized model to {device}...")
+                model = model.to(device)
+        else:
+            model = load_llava_model(model_path, device=device)
 
         # Create image processor
         image_processor = CLIPImageProcessor.from_config(model._vlm_config.vision_config)
@@ -123,9 +163,11 @@ def _load_generator(args: argparse.Namespace):
                 sys.exit(1)
             logger.info(f"Loading image: {args.image}")
             image = Image.open(image_path)
+            logger.info(f"Image size: {image.size}, mode: {image.mode}")
+            logger.info("Preprocessing image...")
             processed = image_processor.preprocess(image)
             pixel_values = processed["pixel_values"].to(device, dtype=model.dtype)
-            logger.info(f"Image processed: {pixel_values.shape}")
+            logger.info(f"Image preprocessed: {pixel_values.shape}, dtype: {pixel_values.dtype}")
     else:
         def get_quantized_dir(mp: str) -> Path:
             p = Path(mp)
@@ -176,6 +218,11 @@ def _load_generator(args: argparse.Namespace):
             if not isinstance(input_ids, torch.Tensor):
                 input_ids = input_ids["input_ids"]
             return input_ids.to(device)
+
+        # No chat template — apply default instruct format for VLM models
+        if is_vlm:
+            prompt = f"[INST] {prompt} [/INST]"
+
         return tokenizer.encode(prompt, return_tensors="pt").to(device)
 
     logger.info("Ready.")
@@ -203,6 +250,8 @@ def _load_generator(args: argparse.Namespace):
         if stream:
             generated_tokens: list[int] = []
             prev_text = ""
+            token_count = 0
+            logger.info("Starting streaming generation...")
             for token_id in generator.generate_stream(
                 input_ids,
                 pixel_values=pixel_values,
@@ -212,10 +261,14 @@ def _load_generator(args: argparse.Namespace):
                 repetition_penalty=args.repetition_penalty,
                 eos_token_id=tokenizer.eos_token_id,
             ):
+                token_count += 1
+                if token_count == 1:
+                    logger.info(f"First token generated (prefill done)")
                 generated_tokens.append(token_id)
                 full_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
                 print(full_text[len(prev_text):], end="", flush=True)
                 prev_text = full_text
+            logger.info(f"Generation complete: {token_count} tokens")
             print()
         else:
             with torch.no_grad():
@@ -254,8 +307,10 @@ def cmd_generate(args: argparse.Namespace) -> None:
     if hasattr(args, "image") and args.image:
         print(f"Image: {args.image}")
     print("-" * 50)
+    print("[Starting inference...]", flush=True)
     print("Output: ", end="", flush=True)
     respond(prompt, stream=not args.no_stream)
+    print("\n[Done]", flush=True)
 
 
 def cmd_chat(args: argparse.Namespace) -> None:

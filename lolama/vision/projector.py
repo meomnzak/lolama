@@ -46,6 +46,6 @@ class MultiModalProjector(nn.Module):
             e.g., (1, 576, 4096) ready to be merged with text embeddings
         """
         hidden_states = self.linear_1(image_features)
-        hidden_states = F.gelu(hidden_states, approximate="tanh")
+        hidden_states = F.gelu(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states

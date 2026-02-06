@@ -19,6 +19,9 @@ from .llama import Llama
 from .vlm_config import VLMConfig
 from ..vision.clip import CLIPVisionTransformer
 from ..vision.projector import MultiModalProjector
+from ..utils.logging import get_model_logger
+
+logger = get_model_logger()
 
 
 class LLaVA(nn.Module):
@@ -218,18 +221,28 @@ class LLaVA(nn.Module):
 
         if has_images:
             # Encode images
+            logger.debug("Encoding image through vision tower...")
             image_features = self.encode_images(pixel_values)
+            logger.debug(f"Image encoded: {image_features.shape}")
 
             # Merge image features with text embeddings
+            logger.debug("Merging image features with text embeddings...")
             merged_embeds = self._merge_input_ids_with_image_features(
                 input_ids, image_features
             )
+            logger.debug(f"Merged embeddings: {merged_embeds.shape}")
 
             # Mark images as processed (cached in KV cache after first pass)
             if kv_caches is not None:
                 self._image_features_cached = True
 
+            # Offload vision tower to CPU — it's no longer needed until next image
+            self.vision_tower.to("cpu")
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            logger.debug("Vision tower offloaded to CPU")
+
             # Forward through LLM
+            logger.debug("Running LLM forward pass (prefill)...")
             return self.language_model(
                 inputs_embeds=merged_embeds,
                 kv_caches=kv_caches,
@@ -244,8 +257,12 @@ class LLaVA(nn.Module):
             )
 
     def reset_image_cache(self) -> None:
-        """Reset image cache flag for new generation."""
+        """Reset image cache flag and restore vision tower for new generation."""
         self._image_features_cached = False
+        # Move vision tower back to model device if it was offloaded
+        if next(self.vision_tower.parameters()).device != self.device:
+            self.vision_tower.to(self.device)
+            logger.debug("Vision tower restored to %s", self.device)
 
     def init_rope(self) -> None:
         """Re-initialize RoPE buffers in language model."""

@@ -48,7 +48,7 @@ class TextGenerator:
         """Get the model config."""
         return self.model.config
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate(
         self,
         input_ids: torch.Tensor,
@@ -92,14 +92,20 @@ class TextGenerator:
 
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]
+        max_len: int = prompt_len + config.max_new_tokens
 
         # Track which sequences have finished (hit eos)
         finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
+        # Pre-allocate token buffer (like KV cache — fill by index, never reallocate)
+        all_ids: torch.Tensor = torch.empty(batch_size, max_len, dtype=input_ids.dtype, device=input_ids.device)
+        all_ids[:, :prompt_len] = input_ids
+        current_len: int = prompt_len
+
         # Create pre-allocated KV cache
         kv_caches: list[KVCache] = self.model.create_kv_caches(
             batch_size=batch_size,
-            max_seq_len=prompt_len + config.max_new_tokens,
+            max_seq_len=max_len,
         )
 
         # Create sampler
@@ -119,13 +125,15 @@ class TextGenerator:
         for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
 
-            # Apply repetition penalty
-            Sampler.apply_repetition_penalty(next_logits, input_ids, config.repetition_penalty)
+            # Apply repetition penalty over all tokens so far
+            Sampler.apply_repetition_penalty(next_logits, all_ids[:, :current_len], config.repetition_penalty)
 
             # Sample next token
             next_token: torch.Tensor = sampler.sample(next_logits)
 
-            input_ids = torch.cat([input_ids, next_token], dim=1)
+            # Store in pre-allocated buffer (no allocation)
+            all_ids[:, current_len] = next_token.squeeze(-1)
+            current_len += 1
 
             # Check for EOS token
             if config.eos_token_id is not None:
@@ -136,9 +144,9 @@ class TextGenerator:
             # Subsequent passes don't need pixel_values (cached in KV)
             logits = self.model(next_token, kv_caches=kv_caches)
 
-        return input_ids
+        return all_ids[:, :current_len]
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate_stream(
         self,
         input_ids: torch.Tensor,
@@ -169,6 +177,7 @@ class TextGenerator:
 
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]
+        max_len: int = prompt_len + config.max_new_tokens
 
         if batch_size != 1:
             raise ValueError("Streaming only supports batch_size=1")
@@ -181,10 +190,15 @@ class TextGenerator:
             do_sample=config.do_sample,
         )
 
+        # Pre-allocate token buffer (like KV cache — fill by index, never reallocate)
+        all_ids: torch.Tensor = torch.empty(1, max_len, dtype=input_ids.dtype, device=input_ids.device)
+        all_ids[:, :prompt_len] = input_ids
+        current_len: int = prompt_len
+
         # Create pre-allocated KV cache
         kv_caches: list[KVCache] = self.model.create_kv_caches(
             batch_size=batch_size,
-            max_seq_len=prompt_len + config.max_new_tokens,
+            max_seq_len=max_len,
         )
 
         # Initial forward pass (populates cache) - include pixel_values for VLMs
@@ -196,25 +210,29 @@ class TextGenerator:
         for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
 
-            # Apply repetition penalty
-            Sampler.apply_repetition_penalty(next_logits, input_ids, config.repetition_penalty)
+            # Apply repetition penalty over all tokens so far
+            Sampler.apply_repetition_penalty(next_logits, all_ids[:, :current_len], config.repetition_penalty)
 
             # Sample next token
             next_token: torch.Tensor = sampler.sample(next_logits)
 
+            # Store in pre-allocated buffer (no allocation)
+            all_ids[:, current_len] = next_token.squeeze(-1)
+            current_len += 1
+
+            # Queue next forward pass BEFORE extracting token value.
+            # On MPS this keeps the GPU busy while we sync for the yield.
+            logits = self.model(next_token, kv_caches=kv_caches)
+
+            # Extract token (forces sync, but next forward is already queued)
             token_id: int = next_token.item()
 
-            # Check for EOS token before yielding
             if config.eos_token_id is not None and token_id == config.eos_token_id:
                 break
 
             yield token_id
-
-            input_ids = torch.cat([input_ids, next_token], dim=1)
-            # Subsequent passes don't need pixel_values (cached in KV)
-            logits = self.model(next_token, kv_caches=kv_caches)
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate_batch(
         self,
         prompts: list[torch.Tensor],
@@ -222,27 +240,28 @@ class TextGenerator:
         **kwargs,
     ) -> list[torch.Tensor]:
         """Generate text for multiple prompts in parallel.
-        
+
         Args:
             prompts: List of token ID tensors, each (1, L_i) or (L_i,)
             config: Generation configuration (preferred)
             **kwargs: Individual parameters (for backwards compatibility)
-        
+
         Returns:
             List of generated token tensors (without padding)
         """
         if config is None:
             config = GenerationConfig(**kwargs)
-        
+
         self.model.eval()
         device: torch.device = self.device
         batch_size: int = len(prompts)
-        
+
         # Normalize prompts to 1D tensors
         prompts = [p.squeeze() if p.dim() > 1 else p for p in prompts]
         prompt_lengths: list[int] = [len(p) for p in prompts]
         max_prompt_len: int = max(prompt_lengths)
-        
+        max_total_len: int = max_prompt_len + config.max_new_tokens
+
         # Pad prompts to same length (left-padding for causal LM)
         padded_prompts: list[torch.Tensor] = []
         for p in prompts:
@@ -252,21 +271,29 @@ class TextGenerator:
                 padded_prompts.append(torch.cat([padding, p]))
             else:
                 padded_prompts.append(p.to(device))
-        
-        input_ids: torch.Tensor = torch.stack(padded_prompts)  # (B, max_prompt_len)
-        
-        # Create attention mask: 1 for real tokens, 0 for padding
-        attention_mask: torch.Tensor = (input_ids != config.pad_token_id).long()
-        
+
+        # Pre-allocate token and mask buffers (like KV cache — fill by index)
+        all_ids: torch.Tensor = torch.full(
+            (batch_size, max_total_len), config.pad_token_id,
+            dtype=padded_prompts[0].dtype, device=device,
+        )
+        all_ids[:, :max_prompt_len] = torch.stack(padded_prompts)
+
+        all_mask: torch.Tensor = torch.zeros(
+            batch_size, max_total_len, dtype=torch.long, device=device,
+        )
+        all_mask[:, :max_prompt_len] = (all_ids[:, :max_prompt_len] != config.pad_token_id).long()
+        current_len: int = max_prompt_len
+
         # Track which sequences have finished
         finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        
+
         # Create KV caches
         kv_caches: list[KVCache] = self.model.create_kv_caches(
             batch_size=batch_size,
-            max_seq_len=max_prompt_len + config.max_new_tokens,
+            max_seq_len=max_total_len,
         )
-        
+
         # Create sampler
         sampler: Sampler = Sampler(
             temperature=config.temperature,
@@ -274,50 +301,53 @@ class TextGenerator:
             top_p=config.top_p,
             do_sample=config.do_sample,
         )
-        
+
         # Prefill
-        logits: torch.Tensor = self.model(input_ids, kv_caches=kv_caches, attention_mask=attention_mask)
-        
+        logits: torch.Tensor = self.model(
+            all_ids[:, :max_prompt_len], kv_caches=kv_caches,
+            attention_mask=all_mask[:, :max_prompt_len],
+        )
+
         # Generation loop
         generated_tokens: list[list[int]] = [[] for _ in range(batch_size)]
-        
+
         for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
-            
+
             # Apply repetition penalty (ignore pad token)
             Sampler.apply_repetition_penalty(
-                next_logits, input_ids, config.repetition_penalty,
+                next_logits, all_ids[:, :current_len], config.repetition_penalty,
                 ignore_token_id=config.pad_token_id
             )
-            
+
             # Sample next token
             next_token: torch.Tensor = sampler.sample(next_logits)
-            
+
+            # Store in pre-allocated buffers (no allocation)
+            all_ids[:, current_len] = next_token.squeeze(-1)
+            all_mask[:, current_len] = 1
+            current_len += 1
+
             # Store generated tokens (only for unfinished sequences)
             for i in range(batch_size):
                 if not finished[i]:
                     generated_tokens[i].append(next_token[i].item())
-            
+
             # Check for EOS
             if config.eos_token_id is not None:
                 finished = finished | (next_token.squeeze(-1) == config.eos_token_id)
                 if finished.all():
                     break
-            
-            # Update for next iteration
-            input_ids = torch.cat([input_ids, next_token], dim=1)
-            # Extend attention mask (new tokens are always real)
-            attention_mask = torch.cat([
-                attention_mask,
-                torch.ones(batch_size, 1, dtype=attention_mask.dtype, device=device)
-            ], dim=1)
-            
-            logits = self.model(next_token, kv_caches=kv_caches, attention_mask=attention_mask)
-        
+
+            logits = self.model(
+                next_token, kv_caches=kv_caches,
+                attention_mask=all_mask[:, :current_len],
+            )
+
         # Return original prompts + generated tokens (without padding)
         results: list[torch.Tensor] = []
         for i, prompt in enumerate(prompts):
             generated: torch.Tensor = torch.tensor(generated_tokens[i], dtype=prompt.dtype, device=device)
             results.append(torch.cat([prompt, generated]))
-        
+
         return results
